@@ -270,19 +270,18 @@ jobs:
           AVAIL=$(df -P -k / | awk 'NR==2{print $4}')
           if [ "$AVAIL" -lt 26000000 ]; then echo "::error::磁盘不足：只有 $((AVAIL/1024/1024)) GB 可用"; exit 1; fi
 
-      - name: 打开 HFS+ 支持（runner 内核默认没有 hfsplus 模块）
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y "linux-modules-extra-$(uname -r)"
-          sudo modprobe hfsplus
-          grep hfsplus /proc/filesystems
-
-      - name: 依赖 + 编 apfs-fuse
+      - name: 依赖 + HFS+ 模块 + 编 apfs-fuse
+        timeout-minutes: 25
         run: |
           set -e
           sudo apt-get update -qq
           sudo apt-get install -y build-essential cmake pkg-config libfuse3-dev libbz2-dev \
-            zlib1g-dev libssl-dev hfsprogs rsync fuse3 android-sdk-libsparse-utils unzip curl
+            zlib1g-dev libssl-dev hfsprogs rsync fuse3 android-sdk-libsparse-utils unzip curl \
+            "linux-modules-extra-$(uname -r)"
+          # runner 内核默认没编 hfsplus，必须装 modules-extra 再 modprobe
+          sudo modprobe hfsplus
+          grep hfsplus /proc/filesystems
+          # apfs-fuse 不在 Ubuntu 源里，自己编
           if [ ! -x "$(command -v apfs-fuse)" ]; then
             git clone -q --recursive https://github.com/sgan81/apfs-fuse /tmp/apfs-fuse
             cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release
