@@ -1,0 +1,50 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -798,11 +798,23 @@
+ 		mask = 0x1ffu;
+ 		reset = 0x100u;
+ 	}
+-	if (!layout_ok || !rscc_ok) {
++	/*
++	 * sweetgpu_force=1: boot the CM3 even when the pre-flight gates failed.
++	 * The gates exist because SID 4/5 are not programmed yet (SMMU faults are
++	 * expected at this stage) and the RSCC qmp handshake is not implemented;
++	 * stage 0 only wants FW_INIT_RESULT, so allow an explicit override.
++	 */
++	int force = 0;
++	PE_parse_boot_argn("sweetgpu_force", &force, sizeof(force));
++	if ((!layout_ok || !rscc_ok) && !force) {
+ 		printf("SWEET GPU: GMU boot gated layout=%d rscc=%d; not resetting CM3\n",
+ 		    layout_ok, rscc_ok);
+ 		gpu_wr(gmu, GMU_CM3_SYSRESET, 1);
+ 		goto restore;
++	}
++	if ((!layout_ok || !rscc_ok) && force) {
++		printf("SWEET GPU: gates failed (layout=%d rscc=%d) but sweetgpu_force=1: booting CM3 anyway\n",
++		    layout_ok, rscc_ok);
+ 	}
+ 	gpu_wr(gmu, GMU_CM3_FW_INIT_RESULT, 0);
+ 	gpu_wr(gmu, GMU_CM3_BOOT_CONFIG, 0x02);
+@@ -1045,6 +1057,21 @@
+ 	    gpu_rd(gpucc, GPUCC_GMU_BCR), gpu_rd(gpucc, GPUCC_RCG_CMD));
+ 	printf("SWEET GPU: gpucc gdscr gx=%#x cx=%#x\n",
+ 	    gpu_rd(gpucc, GPUCC_GX_GDSCR), gpu_rd(gpucc, GPUCC_CX_GDSCR));
++
++	/*
++	 * sweetgpu_halt=1: freeze here so the probe output stays on the panel.
++	 * There is no serial port and the console scrolls away as the boot
++	 * continues, so a frozen screen is the only way to read the registers.
++	 */
++	{
++		int halt = 0;
++		if (PE_parse_boot_argn("sweetgpu_halt", &halt, sizeof(halt)) && halt) {
++			printf("SWEET GPU: probe done, halting (sweetgpu_halt=1)\n");
++			for (;;) {
++				__asm__ __volatile__("wfe");
++			}
++		}
++	}
+ }
+ 
+ #endif /* ARM64_BOARD_CONFIG_GUACAMOLE */
