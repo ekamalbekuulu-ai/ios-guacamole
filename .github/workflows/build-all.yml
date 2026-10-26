@@ -30,6 +30,10 @@ on:
         description: '根卷大小'
         type: string
         default: '16G'
+      dram_size:
+        description: 'DRAM 大小（8 GB 机 = 0x180000000 / 12 GB = 0x280000000 / 6 GB 留空）'
+        type: string
+        default: '0x180000000'
 
 permissions:
   contents: write   # 上传 Release 成品
@@ -129,7 +133,6 @@ jobs:
   # ---------------------------------------------------------------- ② shim-boot.img
   shim:
     if: ${{ inputs.do_shim }}
-    needs: [kernel]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -146,10 +149,36 @@ jobs:
           name: d22ap-adt
           path: research/ipsw-x
 
+      - name: 内核兜底：从最近一次成功的构建里取（不重复烧 macOS 分钟）
+        if: ${{ hashFiles('xnu/out/kernel.development.guacamole') == '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          ID=$(gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts?name=xnu-kernel&per_page=50" \
+                 --jq '[.artifacts[]|select(.expired==false)]|sort_by(.created_at)|last|.id')
+          if [ -z "$ID" ] || [ "$ID" = "null" ]; then echo "::error::仓库里没有 xnu-kernel artifact，先跑 kernel"; exit 1; fi
+          echo "用 artifact $ID"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$ID/zip" > /tmp/k.zip
+          mkdir -p xnu/out && unzip -o -q /tmp/k.zip -d xnu/out
+          ls -l xnu/out
+
+      - name: iPhone X 的 d22ap.adt 兜底（只拉 IPSW 里一个小文件 + 纯 Python 解压）
+        if: ${{ hashFiles('research/ipsw-x/d22ap.adt') == '' }}
+        run: |
+          set -e
+          python3 -m pip install --quiet pyimg4
+          python3 tools/remotezip.py "${{ inputs.ipsw_url }}" DeviceTree.d22ap.im4p research/ipsw-x/dt
+          IM4P=$(find research/ipsw-x/dt -name 'DeviceTree.d22ap.im4p' | head -1)
+          echo "IM4P=$IM4P"
+          python3 -m pyimg4 im4p extract -i "$IM4P" -o research/ipsw-x/d22ap.adt
+          ls -l research/ipsw-x/d22ap.adt
+          head -c 4 research/ipsw-x/d22ap.adt | xxd || true
+
       - name: 工具链
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu cpio python3
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu cpio python3 curl
           # ubuntu-22.04 的源里没有 android-sdk-mkbootimg，直接用 AOSP 的实现
           git clone -q --depth 1 https://android.googlesource.com/platform/system/tools/mkbootimg /tmp/mkbootimg-src
           printf '#!/bin/sh\nexec python3 /tmp/mkbootimg-src/mkbootimg.py "$@"\n' | sudo tee /usr/local/bin/mkbootimg >/dev/null
@@ -180,7 +209,11 @@ jobs:
           K=xnu/out/kernel.development.guacamole
           [ -f "$K" ] || { echo "::error::没有内核产物 $K"; ls -la xnu/out; exit 1; }
           mkdir -p shim/out
-          python3 tools/mkadt.py shim/out/guacamole.adt --device guacamole --highmem
+          ADT_ARGS="--device guacamole --highmem"
+          if [ -n "${{ inputs.dram_size }}" ]; then ADT_ARGS="$ADT_ARGS --dram-size ${{ inputs.dram_size }}"; fi
+          echo "mkadt $ADT_ARGS"
+          python3 tools/mkadt.py shim/out/guacamole.adt $ADT_ARGS
+          ls -l shim/out/guacamole.adt
           python3 tools/mkpayload.py "$K" shim/out/guacamole.adt shim/out/payload.bin \
             --cmdline 'debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetusb=0 sweettouchdelay=20 sweetfb_noconsole=1 sweetfb_hz=30'
           ( cd shim && BOARD=guacamole DTB=../dtb/boot_unpacked/dtb ./build.sh ../shim/out/payload.bin )
