@@ -1,0 +1,22 @@
+name: fsprobe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: HFS+ 内核模块能不能补上
+        run: |
+          uname -r
+          echo "--- 现有文件系统 ---"
+          cat /proc/filesystems | grep -i -e hfs -e exfat || echo "没有 hfs"
+          echo "--- modprobe ---"
+          sudo modprobe hfsplus 2>&1 && echo MODPROBE_OK || echo MODPROBE_FAIL
+          echo "--- 候选包 ---"
+          apt-cache policy "linux-modules-extra-$(uname -r)" 2>&1 | head -6
+          echo "--- 安装 ---"
+          sudo apt-get update -qq || true
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" 2>&1 | tail -5 || echo INSTALL_FAIL
+          sudo modprobe hfsplus 2>&1 && echo AFTER_OK || echo AFTER_FAIL
+          cat /proc/filesystems | grep -i hfs || echo "还是没有"
+          echo "--- 备用：24.04 风格的内核包 ---"
+          apt-cache search 'linux-modules-extra' 2>/dev/null | head -5
