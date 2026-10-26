@@ -1,0 +1,25 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -1045,6 +1045,21 @@
+ 	    gpu_rd(gpucc, GPUCC_GMU_BCR), gpu_rd(gpucc, GPUCC_RCG_CMD));
+ 	printf("SWEET GPU: gpucc gdscr gx=%#x cx=%#x\n",
+ 	    gpu_rd(gpucc, GPUCC_GX_GDSCR), gpu_rd(gpucc, GPUCC_CX_GDSCR));
++
++	/*
++	 * sweetgpu_halt=1: freeze here so the probe output stays on the panel.
++	 * There is no serial port and the console scrolls away as the boot
++	 * continues, so a frozen screen is the only way to read the registers.
++	 */
++	{
++		int halt = 0;
++		if (PE_parse_boot_argn("sweetgpu_halt", &halt, sizeof(halt)) && halt) {
++			printf("SWEET GPU: probe done, halting (sweetgpu_halt=1)\n");
++			for (;;) {
++				__asm__ __volatile__("wfe");
++			}
++		}
++	}
+ }
+ 
+ #endif /* ARM64_BOARD_CONFIG_GUACAMOLE */
