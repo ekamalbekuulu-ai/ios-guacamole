@@ -192,7 +192,7 @@ jobs:
           head -c 4 research/ipsw-x/d22ap.adt | xxd || true
 
       - name: 工具链
-        timeout-minutes: 8
+        timeout-minutes: 25
         run: |
           set -e
           sudo apt-get update -qq
