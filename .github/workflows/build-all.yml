@@ -31,9 +31,9 @@ on:
         type: string
         default: '16G'
       dram_size:
-        description: 'DRAM 大小（8 GB 机 = 0x180000000 / 12 GB = 0x280000000 / 6 GB 留空）'
+        description: '高位内存大小：留空=用设备配置默认 0x100000000(4 GiB)；只有实测确认过才填'
         type: string
-        default: '0x180000000'
+        default: ''
       console_debug:
         description: '调试：把内核文字留在屏幕上 + 下次启动打印上一次的日志环'
         type: string
