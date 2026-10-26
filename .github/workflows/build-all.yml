@@ -256,6 +256,13 @@ jobs:
           AVAIL=$(df -P -k / | awk 'NR==2{print $4}')
           if [ "$AVAIL" -lt 26000000 ]; then echo "::error::磁盘不足：只有 $((AVAIL/1024/1024)) GB 可用"; exit 1; fi
 
+      - name: 打开 HFS+ 支持（runner 内核默认没有 hfsplus 模块）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+          sudo modprobe hfsplus
+          grep hfsplus /proc/filesystems
+
       - name: 依赖 + 编 apfs-fuse
         run: |
           set -e
