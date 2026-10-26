@@ -208,9 +208,12 @@ jobs:
           fi
           ls -l dtb/boot_unpacked/dtb
 
-      - name: 修可执行位（经 API 推送的文件默认 644）
+      - name: 修补 build.sh（可执行位 + 旧 binutils 不认的参数）
         run: |
           chmod +x shim/build.sh tools/*.sh 2>/dev/null || true
+          # jammy 的 binutils 2.38 没有 --no-warn-rwx-segments（作者环境是 2.39+），去掉即可
+          sed -i 's/-Wl,--no-warn-rwx-segments//g' shim/build.sh
+          grep -n 'shim.ld' shim/build.sh
           ls -l shim/build.sh
 
       - name: 设备树 + payload + boot.img
