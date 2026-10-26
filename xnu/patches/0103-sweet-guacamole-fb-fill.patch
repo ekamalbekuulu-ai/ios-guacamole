@@ -1,0 +1,131 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -69,6 +69,14 @@
+ #define SWEET_FB_NOTIFY_TYPES           8
+ #define SWEET_FB_NOTIFY_VSYNC           5
+ #define SWEET_FB_VSYNC_US               16667
++/*
++ * Boot-arg sweetfb_fill=1: present the logical canvas (1125x2436) scaled up
++ * over the whole panel (1440x3120) with nearest-neighbour sampling instead of
++ * letterboxing it. The two aspect ratios differ by 0.07% (0.4618 vs 0.4615),
++ * so the stretch is invisible, and iOS keeps believing it is an iPhone X
++ * (which is what the UIKit asset lookup needs).
++ */
++static int sweet_fb_fill;
+ #define SWEET_FB_DOT_PITCH              458     /* ppi, as the iPhone X panel */
+ /*
+  * The iOS userland only has status bar / layout data for real iPhone
+@@ -183,6 +191,17 @@
+ 	}
+ 	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	{
++		int fill = 0;
++		if (PE_parse_boot_argn("sweetfb_fill", &fill, sizeof(fill)) && fill) {
++			/* Scale the canvas up to the whole panel; no letterbox shift. */
++			sweet_fb_fill = 1;
++			fOffX = 0;
++			fOffY = 0;
++			IOLog("SWEET FB: fill mode: %ux%u -> %ux%u\n",
++			    fLogicalW, fLogicalH, fWidth, fHeight);
++		}
++	}
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -398,10 +417,43 @@
+ 			src = 0;
+ 		}
+ 		if (src != 0 && bpe == 4) {
+-			for (int32_t y = 0; y < h; y++) {
+-				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+-				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+-				    (size_t)w * 4);
++			if (sweet_fb_fill && fLogicalW > 0 && fLogicalH > 0 &&
++			    ((uint32_t)fLogicalW != fWidth || (uint32_t)fLogicalH != fHeight)) {
++				/*
++				 * Scale-to-fill: the layer's dest rect is in logical
++				 * (1125x2436) coordinates; map it onto the panel and
++				 * resample nearest-neighbour. dx/dy are unshifted here
++				 * because fill mode sets fOffX/fOffY to 0.
++				 */
++				int32_t dw = (int32_t)(((int64_t)w * fWidth) / fLogicalW);
++				int32_t dh = (int32_t)(((int64_t)h * fHeight) / fLogicalH);
++				int32_t px = (int32_t)(((int64_t)dx * fWidth) / fLogicalW);
++				int32_t py = (int32_t)(((int64_t)dy * fHeight) / fLogicalH);
++
++				if (dw > (int32_t)fWidth - px) {
++					dw = (int32_t)fWidth - px;
++				}
++				if (dh > (int32_t)fHeight - py) {
++					dh = (int32_t)fHeight - py;
++				}
++				for (int32_t y = 0; y < dh; y++) {
++					int32_t yy = sy + (int32_t)(((int64_t)y * h) / dh);
++					uint8_t *drow = fPixels + (uint64_t)(py + y) * fRowBytes +
++					    (uint64_t)px * 4;
++					const uint8_t *srow = src + s->offset +
++					    (uint64_t)yy * s->bytesPerRow + (uint64_t)sx * 4;
++					for (int32_t x = 0; x < dw; x++) {
++						int32_t xx = (int32_t)(((int64_t)x * w) / dw);
++						*(uint32_t *)(drow + (uint64_t)x * 4) =
++						    *(const uint32_t *)(srow + (uint64_t)xx * 4);
++					}
++				}
++			} else {
++				for (int32_t y = 0; y < h; y++) {
++					memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
++					    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
++					    (size_t)w * 4);
++				}
+ 			}
+ 		}
+ 		s->release();
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -369,6 +369,7 @@
+ private:
+ 	IOLock *fLock;
+ 	int fLogicalW, fLogicalH, fOffX, fOffY;
++	int fFill;              /* sweetfb_fill=1: panel is a scaled canvas */
+ 	bool fDown[SWEET_TOUCH_FINGERS];
+ 	bool fEdge[SWEET_TOUCH_FINGERS];
+ 	IOFixed fX[SWEET_TOUCH_FINGERS];
+@@ -439,6 +440,17 @@
+ 	fLogicalH = native ? SWEET_DEV_FB_H : 2436;
+ 	fOffX = (fLogicalW - SWEET_DEV_FB_W) / 2;
+ 	fOffY = (fLogicalH - SWEET_DEV_FB_H) / 2;
++	{
++		int fill = 0;
++		/* sweetfb_fill=1: the framebuffer stretches the logical canvas over
++		 * the whole panel, so a panel pixel maps to the normalised range
++		 * across the panel (not across the letterboxed canvas). */
++		if (PE_parse_boot_argn("sweetfb_fill", &fill, sizeof(fill)) && fill) {
++			fFill = 1;
++			fOffX = 0;
++			fOffY = 0;
++		}
++	}
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(SWEET_DEV_PANEL_MM_W << 16), 32);	/* mm, 16.16 */
+@@ -466,8 +478,15 @@
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+ 	/* Panel pixels -> the presented 1125x2436 display (SweetFramebuffer.cpp). */
+-	IOFixed nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
+-	IOFixed ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
++	IOFixed nx, ny;
++	if (fFill) {
++		/* Fill mode: the canvas covers the whole panel. */
++		nx = (IOFixed)(((int64_t)x << 16) / SWEET_DEV_FB_W);
++		ny = (IOFixed)(((int64_t)y << 16) / SWEET_DEV_FB_H);
++	} else {
++		nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
++		ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
++	}
+ 	bool moved = down && (nx != fX[finger] || ny != fY[finger]);
+ 	if (was == down && !moved) {
+ 		IOLockUnlock(fLock);
