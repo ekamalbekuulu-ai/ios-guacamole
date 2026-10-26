@@ -254,7 +254,13 @@ jobs:
           fi
           if [ -n "${{ inputs.extra_args }}" ]; then CMDLINE="$CMDLINE ${{ inputs.extra_args }}"; fi
           echo "CMDLINE=$CMDLINE"
-          python3 tools/mkpayload.py "$K" shim/out/guacamole.adt shim/out/payload.bin --cmdline "$CMDLINE"
+          RD=""
+          # GPU GMU 固件随 payload 的 RAMDisk 一起走（sweetgpu=7 需要它）
+          if [ -f firmware/a640_gmu.bin ]; then
+            RD="--ramdisk firmware/a640_gmu.bin"
+            echo "payload 会带上 a640_gmu.bin ($(stat -c%s firmware/a640_gmu.bin) 字节)"
+          fi
+          python3 tools/mkpayload.py "$K" shim/out/guacamole.adt shim/out/payload.bin --cmdline "$CMDLINE" $RD
           ( cd shim && BOARD=guacamole DTB=../dtb/boot_unpacked/dtb bash ./build.sh ../shim/out/payload.bin )
           V="${{ inputs.variant }}"
           cp shim/out/shim-boot.img "shim-boot-$V.img"
