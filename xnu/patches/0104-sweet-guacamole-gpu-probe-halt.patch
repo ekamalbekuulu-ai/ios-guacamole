@@ -1,7 +1,49 @@
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 --- a/bsd/dev/sweet_gpu.c
 +++ b/bsd/dev/sweet_gpu.c
-@@ -798,11 +798,23 @@
+@@ -123,6 +123,14 @@
+ #define GMU_PWR_COL_INTER_FRAME_CTRL (0x50c0u * 4u)
+ #define GMU_PWR_COL_CP_MSG	(0x5100u * 4u)
+ #define GMU_RPMH_CTRL		(0x50e8u * 4u)
++/*
++ * Ported from the mainline msm driver (a6xx_gmu.xml offsets are dwords from
++ * the GPU block at 0x02c00000; sweet maps the GMU at 0x02c6a000, so subtract
++ * 0x6a000):  GMU_RSCC_CONTROL_REQ 0x23b07, ACK 0x23b08, HFI_CTRL_INIT 0x1f986.
++ */
++#define GMU_RSCC_CONTROL_REQ	0x24C1Cu
++#define GMU_RSCC_CONTROL_ACK	0x24C20u
++#define GMU_HFI_CTRL_INIT	0x14618u
+ 
+ /* GPU SMMU (SMMU-500), GR0 global and stream-match registers. */
+ #define GPU_SMMU_PA		0x02ca0000u
+@@ -792,23 +800,59 @@
+ 		}
+ 	}
+ 
++	/*
++	 * a6xx_rpmh_start(): the GPU RSC has to be powered on explicitly before
++	 * the CM3 will execute anything. Without the ACK the firmware never
++	 * starts, which is what the rscc=0 gate was reporting.
++	 */
++	{
++		uint32_t ack = 0;
++
++		gpu_wr(gmu, GMU_RSCC_CONTROL_REQ, 2u);	/* BIT(1) */
++		for (unsigned i = 0; i < 100; ++i) {
++			ack = gpu_rd(gmu, GMU_RSCC_CONTROL_ACK);
++			if (ack & 2u) {
++				break;
++			}
++			delay(10);
++		}
++		printf("SWEET GPU: rscc control req=2 ack=%#x %s\n", ack,
++		    (ack & 2u) ? "ok" : "timeout");
++		gpu_wr(gmu, GMU_RSCC_CONTROL_REQ, 0);
++		rscc_ok = (ack & 2u) != 0;
++	}
+ 	uint32_t last = gpu_rd(gmu, GMU_DTCM_LAST);
+ 	uint32_t mask = 0xffffffffu, reset = 0xbabefaceu;
+ 	if (last > 0x20010004u) {
  		mask = 0x1ffu;
  		reset = 0x100u;
  	}
@@ -19,14 +61,49 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  		    layout_ok, rscc_ok);
  		gpu_wr(gmu, GMU_CM3_SYSRESET, 1);
  		goto restore;
-+	}
+ 	}
 +	if ((!layout_ok || !rscc_ok) && force) {
 +		printf("SWEET GPU: gates failed (layout=%d rscc=%d) but sweetgpu_force=1: booting CM3 anyway\n",
 +		    layout_ok, rscc_ok);
- 	}
++	}
  	gpu_wr(gmu, GMU_CM3_FW_INIT_RESULT, 0);
  	gpu_wr(gmu, GMU_CM3_BOOT_CONFIG, 0x02);
-@@ -1045,6 +1057,21 @@
++	/* mainline a6xx_gmu_fw_start(): keep TCM retention on. */
++	gpu_wr(gmu, GMU_GENERAL_7, 1);
+ 	gpu_wr(gmu, GMU_HFI_QTBL_ADDR, hfi_va ? 0x60001000u : 0);
+ 	gpu_wr(gmu, GMU_HFI_QTBL_INFO, hfi_va ? 1u : 0);
+-	gpu_wr(gmu, GMU_AHB_FENCE_RANGE_0, 0x80a008a0u);
++	/* mainline builds this as BIT(31) | upper(0xa)<<18 | lower(0xa0). */
++	gpu_wr(gmu, GMU_AHB_FENCE_RANGE_0, 0x802800a0u);
+ 	gpu_wr(gmu, GMU_HFI_SFR_ADDR, 0x06040100u);
+ 	/* Clear the CM3 NMI bit so the CM3 runs __main, not the NMI handler. */
+ 	gpu_wr(gmu, GMU_CM3_CFG, 0x4052u);
+@@ -849,6 +893,24 @@
+ 	}
+ 	printf("SWEET GPU: gmu boot last=%#x want=%#x/%#x init=%#x %s\n",
+ 	    last, reset, mask, init, init_ok ? "ok" : "timeout");
++	/*
++	 * a6xx_gmu_hfi_start(): once FW_INIT_RESULT is in, kick the HFI queues
++	 * and wait for the controller to report ready.
++	 */
++	if (init_ok) {
++		uint32_t st = 0;
++
++		gpu_wr(gmu, GMU_HFI_CTRL_INIT, 1);
++		for (unsigned i = 0; i < 100; ++i) {
++			st = gpu_rd(gmu, GMU_HFI_CTRL_STATUS);
++			if (st & 1u) {
++				break;
++			}
++			delay(10);
++		}
++		printf("SWEET GPU: hfi start status=%#x %s\n", st,
++		    (st & 1u) ? "ready" : "timeout");
++	}
+ 	printf("SWEET GPU: gmu boot intr=%#x gmu2host=%#x hfi=%#x fault=%d\n",
+ 	    gpu_rd(gmu, GMU_AO_HOST_INTR_STATUS),
+ 	    gpu_rd(gmu, GMU_GMU2HOST_INTR_INFO),
+@@ -1045,6 +1107,21 @@
  	    gpu_rd(gpucc, GPUCC_GMU_BCR), gpu_rd(gpucc, GPUCC_RCG_CMD));
  	printf("SWEET GPU: gpucc gdscr gx=%#x cx=%#x\n",
  	    gpu_rd(gpucc, GPUCC_GX_GDSCR), gpu_rd(gpucc, GPUCC_CX_GDSCR));
