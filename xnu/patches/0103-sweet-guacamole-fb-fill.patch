@@ -34,7 +34,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  	fLock = IOLockAlloc();
  	fClients = OSArray::withCapacity(4);
  	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
-@@ -398,10 +417,43 @@
+@@ -398,10 +417,44 @@
  			src = 0;
  		}
  		if (src != 0 && bpe == 4) {
@@ -63,10 +63,11 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +				}
 +				for (int32_t y = 0; y < dh; y++) {
 +					int32_t yy = sy + (int32_t)(((int64_t)y * h) / dh);
-+					uint8_t *drow = fPixels + (uint64_t)(py + y) * fRowBytes +
-+					    (uint64_t)px * 4;
-+					const uint8_t *srow = src + s->offset +
-+					    (uint64_t)yy * s->bytesPerRow + (uint64_t)sx * 4;
++					/* fPixels and src hold integer addresses, not pointers. */
++					uint8_t *drow = (uint8_t *)(uintptr_t)(fPixels +
++					    (uint64_t)(py + y) * fRowBytes + (uint64_t)px * 4);
++					const uint8_t *srow = (const uint8_t *)(uintptr_t)(src + s->offset +
++					    (uint64_t)yy * s->bytesPerRow + (uint64_t)sx * 4);
 +					for (int32_t x = 0; x < dw; x++) {
 +						int32_t xx = (int32_t)(((int64_t)x * w) / dw);
 +						*(uint32_t *)(drow + (uint64_t)x * 4) =
