@@ -208,6 +208,11 @@ jobs:
           fi
           ls -l dtb/boot_unpacked/dtb
 
+      - name: 修可执行位（经 API 推送的文件默认 644）
+        run: |
+          chmod +x shim/build.sh tools/*.sh 2>/dev/null || true
+          ls -l shim/build.sh
+
       - name: 设备树 + payload + boot.img
         run: |
           set -e
@@ -222,7 +227,7 @@ jobs:
           ls -l shim/out/guacamole.adt
           python3 tools/mkpayload.py "$K" shim/out/guacamole.adt shim/out/payload.bin \
             --cmdline 'debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetusb=0 sweettouchdelay=20 sweetfb_noconsole=1 sweetfb_hz=30'
-          ( cd shim && BOARD=guacamole DTB=../dtb/boot_unpacked/dtb ./build.sh ../shim/out/payload.bin )
+          ( cd shim && BOARD=guacamole DTB=../dtb/boot_unpacked/dtb bash ./build.sh ../shim/out/payload.bin )
           cp shim/out/shim-boot.img shim-boot.img
           sha256sum shim-boot.img | tee shim-boot.img.sha256
           ls -l shim-boot.img
