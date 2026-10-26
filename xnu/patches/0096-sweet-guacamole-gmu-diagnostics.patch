@@ -1,0 +1,43 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index a57dc67..4c15010 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -561,6 +561,8 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 	    gpu_rd(gpucc, GPUCC_RCG_CMD + 4));
+ 	gpu_enable_branch(gpucc, GPUCC_CX_GMU_CLK, "gpu_cc_cx_gmu_clk");
+ 	gpu_enable_branch(gpucc, GPUCC_GX_GMU_CLK, "gpu_cc_gx_gmu_clk");
++	int cxerr = sweet_rpmh_arc_set("cx.lvl", 2);
++	printf("SWEET GPU: cx.lvl corner 2 %s\n", cxerr ? "failed" : "on");
+ 
+ 	vm_offset_t smmu = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
+ 	if (smmu == 0 || gpu_smmu_setup(smmu, &fw_va, &hfi_va) != 0) {
+@@ -649,20 +651,26 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 	gpu_wr(gmu, GMU_RPMH_CTRL, rpmh | 0xf11u);
+ 	printf("SWEET GPU: gmu hfi=%d rpmh=%#x->%#x\n", hfi_va != 0, rpmh,
+ 	    gpu_rd(gmu, GMU_RPMH_CTRL));
++	printf("SWEET GPU: gmu pre reset=%#x boot=%#x gen7=%#x itcm0=%#x\n",
++	    gpu_rd(gmu, GMU_CM3_SYSRESET), gpu_rd(gmu, GMU_CM3_BOOT_CONFIG),
++	    gpu_rd(gmu, GMU_GENERAL_7), gpu_rd(gmu, GMU_CM3_ITCM_START));
+ 	gpu_wr(gmu, GMU_CM3_SYSRESET, 1);
+ 	gpu_wr(gmu, GMU_CM3_PWR_COL_CP_RESP, 0);
+ 	gpu_wr(gmu, GMU_CM3_SYSRESET, 0);
++	printf("SWEET GPU: gmu reset-after=%#x\n",
++	    gpu_rd(gmu, GMU_CM3_SYSRESET));
+ 	uint32_t init = 0;
++	bool init_ok = false;
+ 	for (unsigned i = 0; i < 2000; ++i) {
+ 		init = gpu_rd(gmu, GMU_CM3_FW_INIT_RESULT);
+-		if ((init & mask) == reset) {
++		if ((init & mask) == reset || (init & 0x1ffu) == 0x100u) {
++			init_ok = true;
+ 			break;
+ 		}
+ 		delay(1);
+ 	}
+ 	printf("SWEET GPU: gmu boot last=%#x want=%#x/%#x init=%#x %s\n",
+-	    last, reset, mask, init,
+-	    ((init & mask) == reset) ? "ok" : "timeout");
++	    last, reset, mask, init, init_ok ? "ok" : "timeout");
+ 	printf("SWEET GPU: gmu boot intr=%#x gmu2host=%#x hfi=%#x\n",
+ 	    gpu_rd(gmu, GMU_AO_HOST_INTR_STATUS),
+ 	    gpu_rd(gmu, GMU_GMU2HOST_INTR_INFO),

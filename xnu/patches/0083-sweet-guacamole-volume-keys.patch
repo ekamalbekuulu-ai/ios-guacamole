@@ -1,0 +1,182 @@
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -23,10 +23,25 @@
+ #define KEYS_CNFG_PA     SWEET_DEV_SPMI_CFG_PA
+ #define KEYS_PON_RT      SWEET_DEV_PON_RT
+ #define KEYS_GPIO_RT     SWEET_DEV_VOL_GPIO_RT
++#define KEYS_GPIO2_RT    SWEET_DEV_VOL_GPIO2_RT
+ #define KEYS_NO_APID     0xffffu
+ 
++/* The SPMI arbiter selects a peripheral by PPID = (SID << 8) | (reg >> 8),
++ * and an observer command only carries the register's low byte. Every PMIC
++ * GPIO pin lives in its own 0x100-byte page, so each pin needs its own APID
++ * lookup (0xc5 = GPIO6, 0xc6 = GPIO7, 0xc1 = GPIO2, ...). */
++#ifndef SWEET_DEV_VOL_GPIO_SID
++#define SWEET_DEV_VOL_GPIO_SID 4
++#endif
++#ifndef SWEET_DEV_VOL_DOWN_PON
++#define SWEET_DEV_VOL_DOWN_PON 1
++#endif
++
+ static vm_offset_t keys_core, keys_obs, keys_cnfg;
+ static uint16_t keys_pon_apid = KEYS_NO_APID, keys_gpio_apid = KEYS_NO_APID;
++#if SWEET_DEV_KEYS_VOLUME && !SWEET_DEV_VOL_DOWN_PON
++static uint16_t keys_gpio2_apid = KEYS_NO_APID;
++#endif
+ static uint32_t keys_version, keys_last_status;
+ static bool keys_started;
+ static int keys_sleep_chan;
+@@ -82,6 +97,37 @@
+ 	return false;
+ }
+ 
++#if SWEET_DEV_KEYS_VOLUME
++static uint16_t
++keys_gpio_ppid(uint32_t rt_addr)
++{
++	return (uint16_t)(((SWEET_DEV_VOL_GPIO_SID & 0xffu) << 8) |
++	    ((rt_addr >> 8) & 0xffu));
++}
++
++/* A PMIC GPIO pin keeps RT_STS at rt, MODE_CTL at +0x30, EN_CTL at +0x36 and
++ * the TYPE/SUBTYPE bytes at -0x0c/-0x0b. Only an enabled digital input makes
++ * RT_STS meaningful; the ABL leaves the volume pins that way. */
++static bool
++keys_gpio_input_ok(uint16_t apid, uint32_t rt, uint8_t *mode_out,
++    uint8_t *en_out, uint8_t *subtype_out)
++{
++	uint8_t mode = 0, en = 0, subtype = 0;
++
++	if (!keys_read(apid, (uint16_t)(rt + 0x30u), &mode) ||
++	    !keys_read(apid, (uint16_t)(rt + 0x36u), &en) ||
++	    !keys_read(apid, (uint16_t)(rt - 0x0bu), &subtype)) {
++		return false;
++	}
++	*mode_out = mode;
++	*en_out = en;
++	*subtype_out = subtype;
++	unsigned dir = (subtype >= 0x10u && subtype <= 0x13u) ?
++	    (mode & 3u) : ((mode >> 4) & 7u);
++	return (en & 0x80u) != 0 && (dir == 0 || dir == 2);
++}
++#endif /* SWEET_DEV_KEYS_VOLUME */
++
+ static void
+ keys_wait(void)
+ {
+@@ -104,19 +150,28 @@
+ #if SWEET_DEV_KEYS_VOLUME
+ 		uint8_t gpio = 0;
+ 		bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
++#if !SWEET_DEV_VOL_DOWN_PON
++		uint8_t gpio2 = 0;
++		bool g2ok = keys_read(keys_gpio2_apid, KEYS_GPIO2_RT, &gpio2);
++		int now[3] = {!!(pon & 1u), !(gpio & 1u), !(gpio2 & 1u)};
++#else
++		bool g2ok = true;
+ 		int now[3] = {!!(pon & 1u), !(gpio & 1u), !!(pon & 2u)};
+-		if (!pok || !gok) {
++#endif
++		if (!pok || !gok || !g2ok) {
+ 			if ((errors++ % 250u) == 0) {
+-				printf("SWEET KEYS: read error pon-ok=%d gpio-ok=%d arb-status=%#x\n",
+-				    pok, gok, keys_last_status);
++				printf("SWEET KEYS: read error pon-ok=%d gpio-ok=%d g2-ok=%d arb-status=%#x\n",
++				    pok, gok, g2ok, keys_last_status);
+ 			}
+ 		} else {
+ 			errors = 0;
+ 		}
+ 		for (int k = 0; k < 3; ++k) {
+-			if ((k == 1 ? gok : pok) && now[k] != state[k]) {
++			bool ok = (k == 0) ? pok : (k == 1 ? gok :
++			    (SWEET_DEV_VOL_DOWN_PON ? pok : g2ok));
++			if (ok && now[k] != state[k]) {
+ 				state[k] = now[k];
+-				printf("SWEET KEYS: key=%d down=%d pon=%#x gpio4:%#x\n",
++				printf("SWEET KEYS: key=%d down=%d pon=%#x gpio=%#x\n",
+ 				    k, state[k], pon, gpio);
+ 				sweet_hid_key(k, state[k]);
+ 			}
+@@ -174,23 +229,37 @@
+ 	uint8_t pon = 0;
+ 	bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
+ #if SWEET_DEV_KEYS_VOLUME
+-	keys_gpio_apid = keys_find_apid(0x4c1, count);
++	uint16_t up_ppid = keys_gpio_ppid(KEYS_GPIO_RT);
++	keys_gpio_apid = keys_find_apid(up_ppid, count);
+ 	uint8_t gpio = 0, mode = 0, en = 0, subtype = 0;
+ 	bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
+-	bool mok = keys_read(keys_gpio_apid, 0xc140, &mode);
+-	bool eok = keys_read(keys_gpio_apid, 0xc146, &en);
+-	bool sok = keys_read(keys_gpio_apid, 0xc105, &subtype);
+-	printf("SWEET KEYS: arb=%#x apids=%u pon-apid=%u gpio4-apid=%u pon=%#x/%d gpio=%#x/%d mode=%#x/%d en=%#x/%d subtype=%#x/%d\n",
+-	    keys_version, count, keys_pon_apid, keys_gpio_apid,
+-	    pon, pok, gpio, gok, mode, mok, en, eok, subtype, sok);
++	bool up_ok = keys_gpio_input_ok(keys_gpio_apid, KEYS_GPIO_RT,
++	    &mode, &en, &subtype);
++	printf("SWEET KEYS: arb=%#x apids=%u pon-apid=%u volup-ppid=%#x apid=%u pon=%#x/%d gpio=%#x/%d mode=%#x en=%#x subtype=%#x input=%d\n",
++	    keys_version, count, keys_pon_apid, up_ppid, keys_gpio_apid,
++	    pon, pok, gpio, gok, mode, en, subtype, up_ok);
+ 	/* GPIO configuration belongs to firmware. Diagnose, never repair it here. */
+-	unsigned dir = subtype >= 0x10u && subtype <= 0x13u ?
+-	    mode & 3u : (mode >> 4) & 7u;
+-	if (!eok || !mok || !sok || !(en & 0x80u) || (dir != 0 && dir != 2)) {
++	if (!up_ok) {
+ 		printf("SWEET KEYS: volume-up GPIO not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
+ 		keys_gpio_apid = KEYS_NO_APID;
+ 	}
++#if !SWEET_DEV_VOL_DOWN_PON
++	uint16_t down_ppid = keys_gpio_ppid(KEYS_GPIO2_RT);
++	keys_gpio2_apid = keys_find_apid(down_ppid, count);
++	uint8_t gpio2 = 0, mode2 = 0, en2 = 0, subtype2 = 0;
++	bool g2ok = keys_read(keys_gpio2_apid, KEYS_GPIO2_RT, &gpio2);
++	bool down_ok = keys_gpio_input_ok(keys_gpio2_apid, KEYS_GPIO2_RT,
++	    &mode2, &en2, &subtype2);
++	printf("SWEET KEYS: voldown-ppid=%#x apid=%u gpio=%#x/%d mode=%#x en=%#x subtype=%#x input=%d\n",
++	    down_ppid, keys_gpio2_apid, gpio2, g2ok, mode2, en2, subtype2, down_ok);
++	if (!down_ok) {
++		printf("SWEET KEYS: volume-down GPIO not confirmed enabled as input; volume-down withheld, PMIC unchanged\n");
++		keys_gpio2_apid = KEYS_NO_APID;
++	}
++	if (!pok && !gok && !g2ok) {
++#else
+ 	if (!pok && !gok) {
++#endif
+ 		printf("SWEET KEYS: no readable keys; polling retained for recovery\n");
+ 	}
+ #else /* !SWEET_DEV_KEYS_VOLUME */
+--- a/pexpert/pexpert/arm64/sweet_dev.h
++++ b/pexpert/pexpert/arm64/sweet_dev.h
+@@ -44,10 +44,18 @@
+ #define SWEET_DEV_PON_RT        0x0810u          /* PON RT_STS (PON base 0x800 + 0x10) */
+ #define SWEET_DEV_VOL_GPIO_RT   0xc110u          /* sweet: PM6150L GPIO2 */
+ 
+-/* Keys: guacamole's volume keys are PM8150 GPIO6 (up) and GPIO7 (down),
+- * not the sweet layout (GPIO2 up / PON RESIN down); the GPIO APID must be
+- * identified on the phone first. Power (PON bit 0) works as on sweet. */
+-#define SWEET_DEV_KEYS_VOLUME   0
++/* Keys: guacamole uses PM8150 (SID 0) GPIO6 = volume up and GPIO7 = volume
++ * down, both active low, instead of sweet's PM6150L GPIO2 + PON RESIN.
++ * A PMIC GPIO pin has its own 0x100-byte SPMI page: GPIO6 RT_STS = 0xc510
++ * (arbiter PPID (SID << 8) | (addr >> 8) = 0x00c5), GPIO7 = 0xc610 (0x00c6);
++ * both are read at pin offset 0x10, bit 0. The ABL configures them as inputs
++ * with pull-up for its own key menu and that survives fastboot boot.
++ * Power is PON bit 0 as on sweet. */
++#define SWEET_DEV_KEYS_VOLUME   1
++#define SWEET_DEV_VOL_GPIO_RT   0xc510u         /* volume up: PM8150 GPIO6 */
++#define SWEET_DEV_VOL_GPIO2_RT  0xc610u         /* volume down: PM8150 GPIO7 */
++#define SWEET_DEV_VOL_GPIO_SID  0               /* PM8150 */
++#define SWEET_DEV_VOL_DOWN_PON  0               /* volume-down is a GPIO here */
+ 
+ /* RPMh: apps RSC / DRV-2 at 0x18220000, TCS command registers at
+  * 0x18220d00 (offset 0xd00; ACTIVE 2 / SLEEP 3 / WAKE 3), command DB at
+@@ -163,6 +171,8 @@
+ #define SWEET_DEV_USB_ARM_ON_EVENT 0
+ #define SWEET_DEV_USB_VBUS_DEFAULT 2
+ #define SWEET_DEV_KEYS_VOLUME   1   /* GPIO2 volume-up + PON RESIN volume-down */
++#define SWEET_DEV_VOL_GPIO_SID  4   /* PM6150L */
++#define SWEET_DEV_VOL_DOWN_PON  1   /* volume-down is PON RESIN */
+ 
+ /* Panel physical size in mm (digitizer reporting). */
+ #define SWEET_DEV_PANEL_MM_W    68

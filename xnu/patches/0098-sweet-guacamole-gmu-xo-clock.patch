@@ -1,0 +1,37 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 4f4fc47..876ccac 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -516,10 +516,10 @@ gpu_hfi_init(vm_offset_t hfi)
+ }
+ 
+ /*
+- * Load the firmware blocks and cold-boot the CM3. The GMU RCG must run at
+- * 200 MHz from GCC's GPLL0 divider: ABL leaves it root-off (XO), so enabled
+- * GMU branches have no parent clock. icache/dcache/HFI use the minimal SMMU
+- * map from gpu_smmu_setup(). The CM3 is reset again afterwards.
++ * Load the firmware blocks and cold-boot the CM3. The GMU RCG is left at XO
++ * (19.2 MHz) here: the earlier 200 MHz GPLL0 setting may have no live parent
++ * on this boot path. icache/dcache/HFI use the minimal SMMU map from
++ * gpu_smmu_setup(). The CM3 is reset again afterwards.
+  */
+ static void
+ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+@@ -556,7 +556,7 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 	gpu_wr(gcc, 0x52004, parent | (1u << 16) | (1u << 15));
+ 	cmd_before = gpu_rd(gpucc, GPUCC_RCG_CMD);
+ 	cfg_before = gpu_rd(gpucc, GPUCC_RCG_CMD + 4);
+-	gpu_wr(gpucc, GPUCC_RCG_CMD + 4, 0x602);	/* src 6, /2 */
++	gpu_wr(gpucc, GPUCC_RCG_CMD + 4, 0x0);	/* XO 19.2MHz fallback */
+ 	gpu_wr(gpucc, GPUCC_RCG_CMD, 0x3);		/* update + root enable */
+ 	for (unsigned i = 0; i < 1000; ++i) {
+ 		uint32_t cmd = gpu_rd(gpucc, GPUCC_RCG_CMD);
+@@ -671,7 +671,7 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 	    gpu_rd(gmu, GMU_CM3_SYSRESET));
+ 	uint32_t init = 0;
+ 	bool init_ok = false;
+-	for (unsigned i = 0; i < 2000; ++i) {
++	for (unsigned i = 0; i < 5000; ++i) {
+ 		init = gpu_rd(gmu, GMU_CM3_FW_INIT_RESULT);
+ 		if ((init & mask) == reset || (init & 0x1ffu) == 0x100u) {
+ 			init_ok = true;

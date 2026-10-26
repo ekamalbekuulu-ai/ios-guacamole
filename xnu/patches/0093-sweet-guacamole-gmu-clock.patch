@@ -1,0 +1,83 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index c8f094c..d5fc2cb 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -13,8 +13,9 @@
+  *   sweetgpu=5   additionally enable the GMU CX/GX clocks and read the GMU
+  *                firmware/reset/HFI registers (read-only)
+  *   sweetgpu=6   additionally read the GPU SMMU ID/global/SID/context state
+- *   sweetgpu=7   additionally load a640_gmu.bin from the payload RAMDisk into
+- *                ITCM/DTCM and cold-boot the CM3 (no HFI yet)
++ *   sweetgpu=7   additionally set the GMU RCG to 200 MHz, load a640_gmu.bin
++ *                from the payload RAMDisk into ITCM/DTCM/SMMU memory and
++ *                cold-boot the CM3 (no HFI yet)
+  *
+  * The ABL leaves gcc_gpu_cfg_ahb_clk gated. Reading the GPUCC register block
+  * in that state wedges the interconnect: the shim probe did exactly that and
+@@ -475,16 +476,17 @@ gpu_fw_rd32(const uint8_t *fw, uint32_t off)
+ }
+ 
+ /*
+- * Load the ITCM/DTCM blocks and cold-boot the CM3. icache/dcache and HFI
+- * need the GPU SMMU (SIDs 4/5 currently fault), so they are skipped here;
+- * the goal is only FW_INIT_RESULT. The CM3 is reset again afterwards.
++ * Load the firmware blocks and cold-boot the CM3. The GMU RCG must run at
++ * 200 MHz from GCC's GPLL0 divider: ABL leaves it root-off (XO), so enabled
++ * GMU branches have no parent clock. icache/dcache/HFI use the minimal SMMU
++ * map from gpu_smmu_setup(). The CM3 is reset again afterwards.
+  */
+ static void
+-gpu_boot_gmu(vm_offset_t gpucc)
++gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ {
+ 	uint32_t fw_len = 0;
+ 	const uint8_t *fw = gpu_fw_image(&fw_len);
+-	uint32_t cx_before, gx_before;
++	uint32_t cx_before, gx_before, parent, cmd_before, cfg_before;
+ 	vm_offset_t gmu, fw_va = 0, hfi_va = 0;
+ 	uint32_t off, itcm = 0, dtcm = 0, bo = 0, skipped = 0;
+ 
+@@ -494,13 +496,32 @@ gpu_boot_gmu(vm_offset_t gpucc)
+ 	}
+ 	cx_before = gpu_rd(gpucc, GPUCC_CX_GMU_CLK);
+ 	gx_before = gpu_rd(gpucc, GPUCC_GX_GMU_CLK);
+-	gpu_enable_branch(gpucc, GPUCC_CX_GMU_CLK, "gpu_cc_cx_gmu_clk");
+-	gpu_enable_branch(gpucc, GPUCC_GX_GMU_CLK, "gpu_cc_gx_gmu_clk");
+ 	gmu = ml_io_map(GPU_GMU_PA, GPU_GMU_SIZE);
+ 	if (gmu == 0) {
+ 		printf("SWEET GPU: GMU mapping failed\n");
+ 		goto restore;
+ 	}
++
++	/* GMU clock tree: GCC GPLL0 divider -> GPUCC GMU RCG at 200 MHz. */
++	parent = gpu_rd(gcc, 0x52004);
++	gpu_wr(gcc, 0x52004, parent | (1u << 16));
++	cmd_before = gpu_rd(gpucc, GPUCC_RCG_CMD);
++	cfg_before = gpu_rd(gpucc, GPUCC_RCG_CMD + 4);
++	gpu_wr(gpucc, GPUCC_RCG_CMD + 4, 0x602);	/* src 6, /2 */
++	gpu_wr(gpucc, GPUCC_RCG_CMD, 0x3);		/* update + root enable */
++	for (unsigned i = 0; i < 1000; ++i) {
++		uint32_t cmd = gpu_rd(gpucc, GPUCC_RCG_CMD);
++		if (!(cmd & 0x1u) && !(cmd & 0x80000000u)) {
++			break;
++		}
++		delay(1);
++	}
++	printf("SWEET GPU: gmu clk parent=%#x rcg cmd=%#x->%#x cfg=%#x->%#x\n",
++	    parent, cmd_before, gpu_rd(gpucc, GPUCC_RCG_CMD), cfg_before,
++	    gpu_rd(gpucc, GPUCC_RCG_CMD + 4));
++	gpu_enable_branch(gpucc, GPUCC_CX_GMU_CLK, "gpu_cc_cx_gmu_clk");
++	gpu_enable_branch(gpucc, GPUCC_GX_GMU_CLK, "gpu_cc_gx_gmu_clk");
++
+ 	vm_offset_t smmu = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
+ 	if (smmu == 0 || gpu_smmu_setup(smmu, &fw_va, &hfi_va) != 0) {
+ 		printf("SWEET GPU: SMMU setup failed; BO blocks will be skipped\n");
+@@ -753,7 +774,7 @@ sweet_gpu_init(void)
+ 							gpu_probe_smmu();
+ 						}
+ 						if (stage >= 7) {
+-							gpu_boot_gmu(gpucc);
++							gpu_boot_gmu(gpucc, gcc);
+ 						}
+ 						gpu_power_down_gx(gpucc);
+ 						probed = true;

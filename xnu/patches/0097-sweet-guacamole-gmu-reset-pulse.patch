@@ -1,0 +1,36 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 4c15010..4f4fc47 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -542,9 +542,18 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 		goto restore;
+ 	}
+ 
++	/* Reset the GMU block before loading anything into ITCM/DTCM. */
++	uint32_t bcr = gpu_rd(gpucc, GPUCC_GMU_BCR);
++	gpu_wr(gpucc, GPUCC_GMU_BCR, bcr | 1u);
++	delay(1);
++	gpu_wr(gpucc, GPUCC_GMU_BCR, bcr & ~1u);
++	delay(1);
++	printf("SWEET GPU: gmu bcr=%#x->%#x\n", bcr,
++	    gpu_rd(gpucc, GPUCC_GMU_BCR));
++
+ 	/* GMU clock tree: GCC GPLL0 divider -> GPUCC GMU RCG at 200 MHz. */
+ 	parent = gpu_rd(gcc, 0x52004);
+-	gpu_wr(gcc, 0x52004, parent | (1u << 16));
++	gpu_wr(gcc, 0x52004, parent | (1u << 16) | (1u << 15));
+ 	cmd_before = gpu_rd(gpucc, GPUCC_RCG_CMD);
+ 	cfg_before = gpu_rd(gpucc, GPUCC_RCG_CMD + 4);
+ 	gpu_wr(gpucc, GPUCC_RCG_CMD + 4, 0x602);	/* src 6, /2 */
+@@ -556,8 +565,9 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 		}
+ 		delay(1);
+ 	}
+-	printf("SWEET GPU: gmu clk parent=%#x rcg cmd=%#x->%#x cfg=%#x->%#x\n",
+-	    parent, cmd_before, gpu_rd(gpucc, GPUCC_RCG_CMD), cfg_before,
++	printf("SWEET GPU: gmu clk parent=%#x->%#x rcg cmd=%#x->%#x cfg=%#x->%#x\n",
++	    parent, gpu_rd(gcc, 0x52004), cmd_before,
++	    gpu_rd(gpucc, GPUCC_RCG_CMD), cfg_before,
+ 	    gpu_rd(gpucc, GPUCC_RCG_CMD + 4));
+ 	gpu_enable_branch(gpucc, GPUCC_CX_GMU_CLK, "gpu_cc_cx_gmu_clk");
+ 	gpu_enable_branch(gpucc, GPUCC_GX_GMU_CLK, "gpu_cc_gx_gmu_clk");

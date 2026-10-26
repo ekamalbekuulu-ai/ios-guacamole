@@ -1,0 +1,112 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 20b0eea..fe5e6ca 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -10,6 +10,8 @@
+  *                AON reset + clamp sequence), read RBBM, then collapse GX
+  *   sweetgpu=4   additionally vote the gfx.lvl ARC rail on before the GX
+  *                sequence, then vote it off after the probe
++ *   sweetgpu=5   additionally enable the GMU CX/GX clocks and read the GMU
++ *                firmware/reset/HFI registers (read-only)
+  *
+  * The ABL leaves gcc_gpu_cfg_ahb_clk gated. Reading the GPUCC register block
+  * in that state wedges the interconnect: the shim probe did exactly that and
+@@ -44,6 +46,8 @@ void sweet_gpu_init(void);
+ #define GPU_GCC_PA		0x00100000u
+ #define GPUCC_PA		0x02c90000u
+ #define GPU_PA			0x02c00000u
++#define GPU_GMU_PA		0x02c6a000u
++#define GPU_GMU_SIZE		0x00030000u
+ 
+ /* GCC branches (enable BIT(0) in the same register). */
+ #define GCC_GPU_CFG_AHB		0x71004u	/* hwcg BIT(1), critical */
+@@ -61,6 +65,8 @@ void sweet_gpu_init(void);
+ #define GPUCC_CX_GDSCR		0x106cu
+ #define GPUCC_GMU_BCR		0x111cu
+ #define GPUCC_RCG_CMD		0x1120u
++#define GPUCC_CX_GMU_CLK	0x1098u
++#define GPUCC_GX_GMU_CLK	0x1064u
+ #define GPUCC_GX_CFG_GDSCR	0x1010u		/* BIT(16) GX power up */
+ #define GPUCC_CX_HW_CTRL	0x1540u		/* BIT(31) = CX on */
+ 
+@@ -80,6 +86,17 @@ void sweet_gpu_init(void);
+ #define GPU_CP_ALWAYS_ON_LO	0x980u
+ #define GPU_CP_ALWAYS_ON_HI	0x981u
+ 
++/* GMU registers: a6xx_gmu.xml.h offsets are dword indices, not bytes. */
++#define GMU_DTCM_LAST		((0x1c00u + 0xff8u) * 4u)
++#define GMU_CM3_SYSRESET	(0x5000u * 4u)
++#define GMU_CM3_BOOT_CONFIG	(0x5001u * 4u)
++#define GMU_CM3_FW_INIT_RESULT	(0x501cu * 4u)
++#define GMU_HFI_CTRL_STATUS	(0x5180u * 4u)
++#define GMU_GMU2HOST_INTR_INFO	(0x5192u * 4u)
++#define GMU_GENERAL_7		(0x51ccu * 4u)
++#define GMU_AO_HOST_INTR_STATUS	(0x9305u * 4u)
++#define GMU_AHB_FENCE_STATUS	(0x9313u * 4u)
++
+ static uint32_t
+ gpu_rd(vm_offset_t base, uint32_t off)
+ {
+@@ -173,6 +190,52 @@ gpu_probe_core(void)
+ 	    (status == 0xffffffffu || status == 0) ? " (no register response)" : "");
+ }
+ 
++/*
++ * Read-only GMU state probe. The GMU CX clock is the HFI/core clock; the GX
++ * clock covers the GX-side logic. Enable them only for the probe, read the
++ * reset/firmware/HFI registers, then restore branches that were off before.
++ * Nothing here writes the GMU or loads firmware.
++ */
++static void
++gpu_probe_gmu(vm_offset_t gpucc)
++{
++	uint32_t cx_before = gpu_rd(gpucc, GPUCC_CX_GMU_CLK);
++	uint32_t gx_before = gpu_rd(gpucc, GPUCC_GX_GMU_CLK);
++	vm_offset_t gmu;
++
++	printf("SWEET GPU: gmu clocks before cx=%#x gx=%#x bcr=%#x rcg=%#x\n",
++	    cx_before, gx_before, gpu_rd(gpucc, GPUCC_GMU_BCR),
++	    gpu_rd(gpucc, GPUCC_RCG_CMD));
++	gpu_enable_branch(gpucc, GPUCC_CX_GMU_CLK, "gpu_cc_cx_gmu_clk");
++	gpu_enable_branch(gpucc, GPUCC_GX_GMU_CLK, "gpu_cc_gx_gmu_clk");
++
++	gmu = ml_io_map(GPU_GMU_PA, GPU_GMU_SIZE);
++	if (gmu == 0) {
++		printf("SWEET GPU: GMU mapping failed\n");
++	} else {
++		printf("SWEET GPU: gmu dtcm-last=%#x fw-init=%#x boot=%#x reset=%#x\n",
++		    gpu_rd(gmu, GMU_DTCM_LAST), gpu_rd(gmu, GMU_CM3_FW_INIT_RESULT),
++		    gpu_rd(gmu, GMU_CM3_BOOT_CONFIG), gpu_rd(gmu, GMU_CM3_SYSRESET));
++		printf("SWEET GPU: gmu intr=%#x gmu2host=%#x hfi=%#x general7=%#x fence=%#x\n",
++		    gpu_rd(gmu, GMU_AO_HOST_INTR_STATUS),
++		    gpu_rd(gmu, GMU_GMU2HOST_INTR_INFO),
++		    gpu_rd(gmu, GMU_HFI_CTRL_STATUS),
++		    gpu_rd(gmu, GMU_GENERAL_7),
++		    gpu_rd(gmu, GMU_AHB_FENCE_STATUS));
++	}
++
++	if (!(cx_before & 1u)) {
++		gpu_wr(gpucc, GPUCC_CX_GMU_CLK,
++		    gpu_rd(gpucc, GPUCC_CX_GMU_CLK) & ~1u);
++	}
++	if (!(gx_before & 1u)) {
++		gpu_wr(gpucc, GPUCC_GX_GMU_CLK,
++		    gpu_rd(gpucc, GPUCC_GX_GMU_CLK) & ~1u);
++	}
++	printf("SWEET GPU: gmu clocks after cx=%#x gx=%#x\n",
++	    gpu_rd(gpucc, GPUCC_CX_GMU_CLK), gpu_rd(gpucc, GPUCC_GX_GMU_CLK));
++}
++
+ /*
+  * Power the GX head switch for a bounded register probe. This is the vendor
+  * gdsc-regulator enable sequence (SW reset, AON reset, deassert clamp, clear
+@@ -311,6 +374,9 @@ sweet_gpu_init(void)
+ 					    corners[i]);
+ 					if (gpu_power_gx(gpucc)) {
+ 						gpu_probe_core();
++						if (stage >= 5) {
++							gpu_probe_gmu(gpucc);
++						}
+ 						gpu_power_down_gx(gpucc);
+ 						probed = true;
+ 						break;

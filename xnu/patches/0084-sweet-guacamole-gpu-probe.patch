@@ -1,0 +1,152 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_gpu.c
+@@ -0,0 +1,117 @@
++/*
++ * GPU bring-up for guacamole, staged and gated by the boot argument so that a
++ * bad step can never affect a normal boot:
++ *
++ *   sweetgpu=0   (default) do nothing
++ *   sweetgpu=1   enable GCC's GPU config AHB clock, then dump the GPUCC state
++ *
++ * The ABL leaves gcc_gpu_cfg_ahb_clk gated. Reading the GPUCC register block
++ * in that state wedges the interconnect: the shim probe did exactly that and
++ * the watchdog dropped the phone into EDL (USB 05c6:900e). GCC itself is
++ * always accessible (the UFS and GENI drivers use it), so the clock is
++ * enabled and its halt status confirmed *before* the first GPUCC read.
++ *
++ * Register offsets: drivers/clk/qcom/gcc-sm8150.c and gpucc-sm8150.c.
++ * The GPU itself (qcom,kgsl-3d0@2C00000) and its own SMMU (0x2ca0000,
++ * contexts SID 0 = gfx3d_user and SID 2 = gfx3d_secure) are not touched yet.
++ */
++#if defined(ARM64_BOARD_CONFIG_GUACAMOLE)
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/arm64/sweet_dev.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++void sweet_gpu_init(void);
++
++#define GPU_GCC_PA		0x00100000u
++#define GPUCC_PA		0x02c90000u
++
++/* GCC branches (enable BIT(0) in the same register). */
++#define GCC_GPU_CFG_AHB		0x71004u	/* hwcg BIT(1), critical */
++#define GCC_GPU_MEMNOC_GFX	0x7100cu	/* voted branch */
++#define GCC_GPU_SNOC_DVM_GFX	0x71018u
++
++/* GPUCC, qcom,gpucc-sm8150. */
++#define GPUCC_GX_BCR		0x1008u
++#define GPUCC_GX_GDSCR		0x100cu		/* +0x4 holds BIT(16) power up */
++#define GPUCC_CX_BCR		0x1068u
++#define GPUCC_CX_GDSCR		0x106cu
++#define GPUCC_GMU_BCR		0x111cu
++#define GPUCC_RCG_CMD		0x1120u
++#define GPUCC_GX_CFG_GDSCR	0x1010u
++#define GPUCC_CX_HW_CTRL	0x1540u		/* BIT(31) = CX on */
++
++static uint32_t
++gpu_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++gpu_wr(vm_offset_t base, uint32_t off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++/* Branch status: CLK_OFF is BIT(31); NOC FSM bits 30:28 read 0b010 when off. */
++static bool
++gpu_clk_on(uint32_t v)
++{
++	return !(v & 0x80000000u) || ((v >> 28) & 7u) == 2u;
++}
++
++static void
++gpu_enable_branch(vm_offset_t gcc, uint32_t off, const char *name)
++{
++	uint32_t before = gpu_rd(gcc, off);
++
++	gpu_wr(gcc, off, before | 1u);
++	for (unsigned i = 0; i < 100 && !gpu_clk_on(gpu_rd(gcc, off)); ++i) {
++		delay(10);
++	}
++	uint32_t after = gpu_rd(gcc, off);
++	printf("SWEET GPU: %s %#x -> %#x%s\n", name, before, after,
++	    gpu_clk_on(after) ? "" : " (still halted)");
++}
++
++void
++sweet_gpu_init(void)
++{
++	int stage = 0;
++	vm_offset_t gcc, gpucc;
++
++	if (!PE_parse_boot_argn("sweetgpu", &stage, sizeof(stage)) || stage <= 0) {
++		return;
++	}
++	gcc = ml_io_map(GPU_GCC_PA, 0x100000);
++	if (gcc == 0) {
++		printf("SWEET GPU: GCC mapping failed\n");
++		return;
++	}
++	gpu_enable_branch(gcc, GCC_GPU_CFG_AHB, "gcc_gpu_cfg_ahb_clk");
++	gpu_enable_branch(gcc, GCC_GPU_MEMNOC_GFX, "gcc_gpu_memnoc_gfx_clk");
++	gpu_enable_branch(gcc, GCC_GPU_SNOC_DVM_GFX, "gcc_gpu_snoc_dvm_gfx_clk");
++
++	gpucc = ml_io_map(GPUCC_PA, 0x9000);
++	if (gpucc == 0) {
++		printf("SWEET GPU: GPUCC mapping failed\n");
++		return;
++	}
++	printf("SWEET GPU: gpucc gx_cfg=%#x cx_hw=%#x\n",
++	    gpu_rd(gpucc, GPUCC_GX_CFG_GDSCR), gpu_rd(gpucc, GPUCC_CX_HW_CTRL));
++	printf("SWEET GPU: gpucc bcr gx=%#x cx=%#x gmu=%#x rcg=%#x\n",
++	    gpu_rd(gpucc, GPUCC_GX_BCR), gpu_rd(gpucc, GPUCC_CX_BCR),
++	    gpu_rd(gpucc, GPUCC_GMU_BCR), gpu_rd(gpucc, GPUCC_RCG_CMD));
++	printf("SWEET GPU: gpucc gdscr gx=%#x cx=%#x\n",
++	    gpu_rd(gpucc, GPUCC_GX_GDSCR), gpu_rd(gpucc, GPUCC_CX_GDSCR));
++}
++
++#endif /* ARM64_BOARD_CONFIG_GUACAMOLE */
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -107,6 +107,7 @@
+ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
++bsd/dev/sweet_gpu.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_touch_sec.c		standard
+ bsd/dev/sweet_rpmh.c			standard
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -51,6 +51,7 @@
+ static void sweet_log_start(void);
+ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
++void sweet_gpu_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
+ 
+@@ -660,6 +661,9 @@
+ 	sweet_keys_init();
+ 	sweet_touch_init();
+ 	sweet_usb_probe();
++#if defined(ARM64_BOARD_CONFIG_GUACAMOLE)
++	sweet_gpu_init();	/* no-op unless sweetgpu=N is on the command line */
++#endif
+ 	return 0;
+ }
+ 

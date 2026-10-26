@@ -1,0 +1,88 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 632b3b1..a57dc67 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -120,6 +120,7 @@ void sweet_gpu_init(void);
+ #define GMU_SYS_BUS_CONFIG	(0x4c0fu * 4u)
+ #define GMU_PWR_COL_INTER_FRAME_CTRL (0x50c0u * 4u)
+ #define GMU_PWR_COL_CP_MSG	(0x5100u * 4u)
++#define GMU_RPMH_CTRL		(0x50e8u * 4u)
+ 
+ /* GPU SMMU (SMMU-500), GR0 global and stream-match registers. */
+ #define GPU_SMMU_PA		0x02ca0000u
+@@ -480,6 +481,40 @@ gpu_fw_rd32(const uint8_t *fw, uint32_t off)
+ 	return *(const volatile uint32_t *)(fw + off);
+ }
+ 
++/*
++ * Minimal a6xx HFI queue table at IOVA 0x60001000: table header, two queue
++ * headers, command queue at +4K and GMU response queue at +8K. The GMU only
++ * needs the descriptors to come up; no HFI message is sent yet.
++ */
++static void
++gpu_hfi_init(vm_offset_t hfi)
++{
++	uint32_t *t = (uint32_t *)(hfi + 0x1000);
++	uint32_t *q0 = t + 6;
++	uint32_t *q1 = t + 18;
++
++	t[0] = 0;		/* version */
++	t[1] = 30;		/* table size in dwords */
++	t[2] = 6;		/* first queue header, in dwords */
++	t[3] = 12;		/* queue header size, in dwords */
++	t[4] = 2;		/* queues */
++	t[5] = 2;		/* active queues */
++
++	q0[0] = 1;		/* status */
++	q0[1] = 0x60002000u;	/* data IOVA */
++	q0[2] = 0xA00u;		/* type 10, id 0 */
++	q0[3] = 0x400u;		/* 4K in dwords */
++	q0[4] = 0; q0[5] = 0; q0[6] = 1; q0[7] = 1;
++	q0[8] = 1; q0[9] = 0; q0[10] = 0; q0[11] = 0;
++
++	q1[0] = 1;
++	q1[1] = 0x60003000u;
++	q1[2] = 0xA01u;
++	q1[3] = 0x400u;
++	q1[4] = 0; q1[5] = 0; q1[6] = 1; q1[7] = 1;
++	q1[8] = 1; q1[9] = 0; q1[10] = 0; q1[11] = 0;
++}
++
+ /*
+  * Load the firmware blocks and cold-boot the CM3. The GMU RCG must run at
+  * 200 MHz from GCC's GPLL0 divider: ABL leaves it root-off (XO), so enabled
+@@ -580,6 +615,9 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 		}
+ 		off += 16 + size;
+ 	}
++	if (hfi_va) {
++		gpu_hfi_init(hfi_va);
++	}
+ 	if (fw_va) {
+ 		flush_dcache(fw_va, 0x200000, FALSE);
+ 	}
+@@ -597,16 +635,20 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 	}
+ 	gpu_wr(gmu, GMU_CM3_FW_INIT_RESULT, 0);
+ 	gpu_wr(gmu, GMU_CM3_BOOT_CONFIG, 0x02);
+-	gpu_wr(gmu, GMU_HFI_QTBL_ADDR, 0);
+-	gpu_wr(gmu, GMU_HFI_QTBL_INFO, 0);
++	gpu_wr(gmu, GMU_HFI_QTBL_ADDR, hfi_va ? 0x60001000u : 0);
++	gpu_wr(gmu, GMU_HFI_QTBL_INFO, hfi_va ? 1u : 0);
+ 	gpu_wr(gmu, GMU_AHB_FENCE_RANGE_0, (1u << 31) | (0xau << 18) | 0xa0u);
+ 	gpu_wr(gmu, GMU_HFI_SFR_ADDR, 0x06040100u);
+-	/* a6xx_gmu_power_config minus the RPMh client (RSCC uCode not loaded). */
++	/* a6xx_gmu_power_config; the RSCC uCode is not loaded yet. */
+ 	gpu_wr(gmu, GMU_SYS_BUS_CONFIG, 1);
+ 	gpu_wr(gmu, GMU_ICACHE_CONFIG, 1);
+ 	gpu_wr(gmu, GMU_DCACHE_CONFIG, 1);
+ 	gpu_wr(gmu, GMU_PWR_COL_INTER_FRAME_CTRL, 0x9c40400u);
+-	gpu_wr(gmu, GMU_PWR_COL_CP_MSG, 0x60002000u);	/* one 4K log page */
++	gpu_wr(gmu, GMU_PWR_COL_CP_MSG, 0x60004000u);	/* one 4K log page */
++	uint32_t rpmh = gpu_rd(gmu, GMU_RPMH_CTRL);
++	gpu_wr(gmu, GMU_RPMH_CTRL, rpmh | 0xf11u);
++	printf("SWEET GPU: gmu hfi=%d rpmh=%#x->%#x\n", hfi_va != 0, rpmh,
++	    gpu_rd(gmu, GMU_RPMH_CTRL));
+ 	gpu_wr(gmu, GMU_CM3_SYSRESET, 1);
+ 	gpu_wr(gmu, GMU_CM3_PWR_COL_CP_RESP, 0);
+ 	gpu_wr(gmu, GMU_CM3_SYSRESET, 0);

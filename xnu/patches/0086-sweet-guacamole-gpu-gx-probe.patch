@@ -1,0 +1,137 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -6,6 +6,8 @@
+  *   sweetgpu=1   enable the GCC GPU clocks, then dump the GPUCC state
+  *   sweetgpu=2   additionally enable the GPUCC AHB clock, power the CX GDSC
+  *                and read the GPU's RBBM liveness registers
++ *   sweetgpu=3   additionally power the GX head switch (vendor SW reset +
++ *                AON reset + clamp sequence), read RBBM, then collapse GX
+  *
+  * The ABL leaves gcc_gpu_cfg_ahb_clk gated. Reading the GPUCC register block
+  * in that state wedges the interconnect: the shim probe did exactly that and
+@@ -48,8 +50,9 @@
+ /* GPUCC, qcom,gpucc-sm8150. */
+ #define GPUCC_AHB_CLK		0x1078u		/* BIT(0), CLK_IS_CRITICAL */
+ #define GPUCC_CXO_CLK		0x109cu		/* rbbmtimer_clk */
+-#define GPUCC_GX_BCR		0x1008u
++#define GPUCC_GX_BCR		0x1008u		/* sw-reset in the GDSC contract */
+ #define GPUCC_GX_GDSCR		0x100cu		/* +0x4 holds BIT(16) power up */
++#define GPUCC_GX_DOMAIN		0x1508u		/* GMEM reset BIT(4), clamp BIT(0) */
+ #define GPUCC_CX_BCR		0x1068u
+ #define GPUCC_CX_GDSCR		0x106cu
+ #define GPUCC_GMU_BCR		0x111cu
+@@ -61,6 +64,10 @@
+ #define GPUCC_GDSC_SW_COLLAPSE	0x00000001u
+ #define GPUCC_GDSC_HW_CONTROL	0x00000002u
+ #define GPUCC_GDSC_PWR_ON	0x80000000u
++#define GPUCC_GDSC_PWR_DOWN	0x00008000u
++#define GPUCC_GDSC_PWR_UP	0x00010000u
++#define GPUCC_GDSC_GMEM_RESET	0x00000010u
++#define GPUCC_GDSC_CLAMP_IO	0x00000001u
+ 
+ /* GPU registers, dword offsets from qcom,kgsl-3d0@2C00000. */
+ #define GPU_RBBM_INT_0_STATUS	0x201u
+@@ -162,6 +169,91 @@
+ 	    (status == 0xffffffffu || status == 0) ? " (no register response)" : "");
+ }
+ 
++/*
++ * Power the GX head switch for a bounded register probe. This is the vendor
++ * gdsc-regulator enable sequence (SW reset, AON reset, deassert clamp, clear
++ * collapse) but without the RPMh gfx.lvl vote and the AOP gpu_noc_wa QMP.
++ * It is therefore opt-in only (sweetgpu=3) and collapses GX again afterwards.
++ */
++static bool
++gpu_power_gx(vm_offset_t gpucc)
++{
++	uint32_t gdscr = gpu_rd(gpucc, GPUCC_GX_GDSCR);
++	uint32_t cfg = gpu_rd(gpucc, GPUCC_GX_CFG_GDSCR);
++
++	printf("SWEET GPU: gx before gdscr=%#x cfg=%#x\n", gdscr, cfg);
++	if (gdscr & GPUCC_GDSC_HW_CONTROL) {
++		printf("SWEET GPU: gx is under hardware control; not touching it\n");
++		return false;
++	}
++	if (cfg & GPUCC_GDSC_PWR_UP) {
++		printf("SWEET GPU: gx already powered; probing without reset\n");
++		return true;
++	}
++	if (cfg & GPUCC_GDSC_PWR_DOWN) {
++		uint32_t bcr = gpu_rd(gpucc, GPUCC_GX_BCR);
++		gpu_wr(gpucc, GPUCC_GX_BCR, bcr | 1u);
++		(void)gpu_rd(gpucc, GPUCC_GX_BCR);
++		delay(1);
++		gpu_wr(gpucc, GPUCC_GX_BCR, bcr & ~1u);
++		(void)gpu_rd(gpucc, GPUCC_GX_BCR);
++	}
++
++	uint32_t domain = gpu_rd(gpucc, GPUCC_GX_DOMAIN);
++	gpu_wr(gpucc, GPUCC_GX_DOMAIN, domain | GPUCC_GDSC_GMEM_RESET);
++	(void)gpu_rd(gpucc, GPUCC_GX_DOMAIN);
++	delay(1);
++	gpu_wr(gpucc, GPUCC_GX_DOMAIN, domain & ~GPUCC_GDSC_GMEM_RESET);
++	(void)gpu_rd(gpucc, GPUCC_GX_DOMAIN);
++
++	domain = gpu_rd(gpucc, GPUCC_GX_DOMAIN);
++	gpu_wr(gpucc, GPUCC_GX_DOMAIN, domain & ~GPUCC_GDSC_CLAMP_IO);
++	(void)gpu_rd(gpucc, GPUCC_GX_DOMAIN);
++
++	gdscr = gpu_rd(gpucc, GPUCC_GX_GDSCR);
++	gpu_wr(gpucc, GPUCC_GX_GDSCR, gdscr & ~GPUCC_GDSC_SW_COLLAPSE);
++	(void)gpu_rd(gpucc, GPUCC_GX_GDSCR);
++	delay(1);
++
++	for (unsigned i = 0; i < 2000; ++i) {
++		cfg = gpu_rd(gpucc, GPUCC_GX_CFG_GDSCR);
++		if (cfg & GPUCC_GDSC_PWR_UP) {
++			break;
++		}
++		delay(1);
++	}
++	printf("SWEET GPU: gx after gdscr=%#x cfg=%#x%s\n",
++	    gpu_rd(gpucc, GPUCC_GX_GDSCR), cfg,
++	    (cfg & GPUCC_GDSC_PWR_UP) ? "" : " (power-up incomplete)");
++	if (!(cfg & GPUCC_GDSC_PWR_UP)) {
++		gpu_wr(gpucc, GPUCC_GX_GDSCR,
++		    gpu_rd(gpucc, GPUCC_GX_GDSCR) | GPUCC_GDSC_SW_COLLAPSE);
++		gpu_wr(gpucc, GPUCC_GX_DOMAIN,
++		    gpu_rd(gpucc, GPUCC_GX_DOMAIN) | GPUCC_GDSC_CLAMP_IO);
++		return false;
++	}
++	return true;
++}
++
++static void
++gpu_power_down_gx(vm_offset_t gpucc)
++{
++	gpu_wr(gpucc, GPUCC_GX_GDSCR,
++	    gpu_rd(gpucc, GPUCC_GX_GDSCR) | GPUCC_GDSC_SW_COLLAPSE);
++	(void)gpu_rd(gpucc, GPUCC_GX_GDSCR);
++	delay(1);
++	for (unsigned i = 0; i < 2000; ++i) {
++		if (gpu_rd(gpucc, GPUCC_GX_CFG_GDSCR) & GPUCC_GDSC_PWR_DOWN) {
++			break;
++		}
++		delay(1);
++	}
++	gpu_wr(gpucc, GPUCC_GX_DOMAIN,
++	    gpu_rd(gpucc, GPUCC_GX_DOMAIN) | GPUCC_GDSC_CLAMP_IO);
++	printf("SWEET GPU: gx collapsed gdscr=%#x cfg=%#x\n",
++	    gpu_rd(gpucc, GPUCC_GX_GDSCR), gpu_rd(gpucc, GPUCC_GX_CFG_GDSCR));
++}
++
+ void
+ sweet_gpu_init(void)
+ {
+@@ -198,6 +290,10 @@
+ 		gpu_enable_branch(gpucc, GPUCC_CXO_CLK, "gpu_cc_cxo_clk");
+ 		if (gpu_clk_on(gpu_rd(gpucc, GPUCC_AHB_CLK))) {
+ 			gpu_probe_core();
++			if (stage >= 3 && gpu_power_gx(gpucc)) {
++				gpu_probe_core();
++				gpu_power_down_gx(gpucc);
++			}
+ 		} else {
+ 			printf("SWEET GPU: GPUCC AHB is gated; skipping GPU core reads\n");
+ 		}

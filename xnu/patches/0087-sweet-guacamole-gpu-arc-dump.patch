@@ -1,0 +1,149 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -35,6 +35,7 @@
+ #include <pexpert/arm64/sweet_dev.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern void sweet_rpmh_arc_dump(void);
+ void sweet_gpu_init(void);
+ 
+ #define GPU_GCC_PA		0x00100000u
+@@ -290,6 +291,9 @@
+ 		gpu_enable_branch(gpucc, GPUCC_CXO_CLK, "gpu_cc_cxo_clk");
+ 		if (gpu_clk_on(gpu_rd(gpucc, GPUCC_AHB_CLK))) {
+ 			gpu_probe_core();
++			if (stage >= 3) {
++				sweet_rpmh_arc_dump();
++			}
+ 			if (stage >= 3 && gpu_power_gx(gpucc)) {
+ 				gpu_probe_core();
+ 				gpu_power_down_gx(gpucc);
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -13,6 +13,7 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
++void sweet_rpmh_arc_dump(void);
+ 
+ /* Live downstream DT has two positional reg entries, no reg-names. */
+ #define RH_RSC_PA       SWEET_DEV_RPMH_RSC_PA
+@@ -45,6 +46,8 @@
+ #define RH_DB_ENTRY     24u
+ #define RH_DB_MAX       0x100000u /* policy bound, not a DT size */
+ #define RH_VRM          4u
++#define RH_ARC          3u
++#define RH_ARC_MAX      32u      /* 16 u16 levels */
+ #define RH_TIMEOUT_US   100000u
+ 
+ static vm_offset_t rh_rsc, rh_tcs, rh_dict, rh_db;
+@@ -210,6 +213,107 @@
+ 	return 0;
+ }
+ 
++/*
++ * Read-only ARC metadata from the command DB. ARC rails (gfx.lvl, cx.lvl,
++ * mx.lvl) are not VRM registers: the resource's auxiliary table maps a raw
++ * hardware level index to an RPMh voltage corner. Dump the address and table
++ * without voting; a vote needs the dependent MX rail and the AOP contract.
++ */
++static int
++rh_arc_lookup(const char *res, uint32_t *address, uint32_t *table, uint32_t *bytes)
++{
++	uint32_t key[2] = {0, 0};
++	unsigned matches = 0;
++
++	for (unsigned i = 0; i < 8 && res[i]; ++i) {
++		key[i / 4] |= (uint32_t)(uint8_t)res[i] << (8u * (i % 4));
++	}
++	for (unsigned i = 0; i < 8; ++i) {
++		uint32_t h = 8u + 16u * i;
++		unsigned slave = rh_db16(h);
++		if (!slave) {
++			break;
++		}
++		if (slave != RH_ARC) {
++			continue;
++		}
++		uint32_t entries = RH_DB_HEADER + rh_db16(h + 2);
++		uint32_t aux = RH_DB_HEADER + rh_db16(h + 4);
++		unsigned count = rh_db16(h + 6);
++		if ((entries & 3u) || !rh_range(entries, count * RH_DB_ENTRY) ||
++		    !rh_range(aux, 0)) {
++			printf("SWEET RPMH: malformed ARC slave header %u\n", i);
++			return EINVAL;
++		}
++		for (unsigned j = 0; j < count; ++j) {
++			uint32_t e = entries + RH_DB_ENTRY * j;
++			if (rh_read(rh_db, e) != key[0] || rh_read(rh_db, e + 4) != key[1]) {
++				continue;
++			}
++			uint32_t addr = rh_read(rh_db, e + 16);
++			uint32_t len = rh_db16(e + 20);
++			uint32_t off = rh_db16(e + 22);
++			if ((len & 1u) || len < 2 || len > RH_ARC_MAX ||
++			    !rh_range(aux + off, len)) {
++				printf("SWEET RPMH: invalid ARC entry for %s addr=%#x len=%u\n",
++				    res, addr, len);
++				return EINVAL;
++			}
++			*address = addr;
++			*table = aux + off;
++			*bytes = len;
++			++matches;
++		}
++	}
++	if (matches != 1) {
++		printf("SWEET RPMH: %s ARC lookup matches=%u; refusing\n", res, matches);
++		return ENODEV;
++	}
++	return 0;
++}
++
++void
++sweet_rpmh_arc_dump(void)
++{
++	static const char *const names[] = { "gfx.lvl", "cx.lvl", "mx.lvl" };
++	int error = 0;
++	bool locked = false;
++	for (unsigned i = 0; i < 20; ++i) {
++		if (!__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
++			locked = true;
++			break;
++		}
++		delay(10);
++	}
++	if (!locked) {
++		printf("SWEET RPMH: ARC dump busy\n");
++		return;
++	}
++	if (rh_poisoned) {
++		printf("SWEET RPMH: previous uncertain transaction; refusing ARC dump\n");
++		goto out;
++	}
++	error = rh_map();
++	if (error) {
++		goto out;
++	}
++	for (unsigned n = 0; n < sizeof(names) / sizeof(names[0]); ++n) {
++		uint32_t addr = 0, table = 0, bytes = 0;
++		error = rh_arc_lookup(names[n], &addr, &table, &bytes);
++		if (error) {
++			continue;
++		}
++		printf("SWEET RPMH: arc %s addr=%#x levels=%u:", names[n], addr, bytes / 2);
++		for (unsigned i = 0; i < bytes / 2; ++i) {
++			uint16_t level = rh_db16(table + 2u * i);
++			printf(" %u(+%u)", level, (unsigned)level + 1u);
++		}
++		printf("\n");
++	}
++out:
++	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
++}
++
+ static bool
+ rh_free(unsigned t)
+ {

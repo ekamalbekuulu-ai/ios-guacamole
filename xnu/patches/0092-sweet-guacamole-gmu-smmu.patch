@@ -1,0 +1,227 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index edf812f..c8f094c 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -41,6 +41,9 @@
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
+ #include <pexpert/arm64/sweet_dev.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_rpmh_arc_dump(void);
+@@ -124,6 +127,10 @@ void sweet_gpu_init(void);
+ #define SMMU_GR0_SMR(n)		(0x800u + (n) * 4u)
+ #define SMMU_GR0_S2CR(n)	(0xc00u + (n) * 4u)
+ 
++/* Stage-1 4K page tables: 2MB block descriptors, Normal WB, inner shareable. */
++#define SMMU_PTE_BLOCK_ATTR	(1u | (1u << 10) | (3u << 8) | (1u << 2))
++#define SMMU_PTE_TABLE		0x3u
++
+ static uint32_t
+ gpu_rd(vm_offset_t base, uint32_t off)
+ {
+@@ -313,6 +320,129 @@ gpu_probe_smmu(void)
+ 	}
+ }
+ 
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++
++static vm_offset_t
++gpu_contig(vm_size_t size, vm_offset_t align, uint64_t *pa)
++{
++	vm_offset_t va = 0;
++	kern_return_t kr;
++	ppnum_t ppn;
++
++	kr = kmem_alloc_contig(kernel_map, &va, size, align, 0, 0,
++	    KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
++	if (kr != KERN_SUCCESS || va == 0) {
++		return 0;
++	}
++	ppn = pmap_find_phys(kernel_pmap, va);
++	if (ppn == 0) {
++		return 0;
++	}
++	*pa = ptoa_64(ppn);
++	return va;
++}
++
++static void
++gpu_smmu_tlb(vm_offset_t s)
++{
++	gpu_wr(s, 0x68u, 1u);	/* sTLBIALLNSNH */
++	gpu_wr(s, 0x70u, 1u);	/* sTLBGSYNC */
++	for (unsigned i = 0; i < 1000 && (gpu_rd(s, 0x74u) & 1u); ++i) {
++		delay(1);
++	}
++}
++
++/*
++ * Minimal GPU-SMMU stage-1 setup for the GMU (SIDs 4/5, context bank 0).
++ * IOVA 0..2MB maps one 2MB block that holds the firmware icache/dcache
++ * blocks; IOVA 0x60000000 maps the dummy/HFI block. This is deliberately
++ * small: no L3 tables, no other SIDs, and the client port is re-enabled
++ * only after the tables and CB are written.
++ */
++static int
++gpu_smmu_setup(vm_offset_t s, vm_offset_t *fw_va, vm_offset_t *hfi_va)
++{
++	uint64_t x_pa = 0, y_pa = 0, pt_pa = 0, x_blk, y_blk;
++	vm_offset_t x_va, y_va, pt_va, x_map, y_map;
++	uint64_t *l1, *l2a, *l2b, ttbr0;
++	uint32_t scr0;
++
++	/* 4MB each: any 4MB range contains a 2MB-aligned 2MB subrange. */
++	x_va = gpu_contig(0x400000, 0xfff, &x_pa);
++	y_va = gpu_contig(0x400000, 0xfff, &y_pa);
++	pt_va = gpu_contig(0x3000, 0xfff, &pt_pa);
++	if (x_va == 0 || y_va == 0 || pt_va == 0) {
++		printf("SWEET GPU: SMMU memory allocation failed\n");
++		if (x_va) {
++			kmem_free(kernel_map, x_va, 0x400000);
++		}
++		if (y_va) {
++			kmem_free(kernel_map, y_va, 0x400000);
++		}
++		if (pt_va) {
++			kmem_free(kernel_map, pt_va, 0x3000);
++		}
++		return ENOMEM;
++	}
++	x_blk = (x_pa + 0x1fffffull) & ~0x1fffffull;
++	y_blk = (y_pa + 0x1fffffull) & ~0x1fffffull;
++	if (x_blk + 0x200000ull > x_pa + 0x400000ull ||
++	    y_blk + 0x200000ull > y_pa + 0x400000ull) {
++		printf("SWEET GPU: SMMU no aligned 2MB block %#x/%#x\n",
++		    (uint32_t)x_pa, (uint32_t)y_pa);
++		return EINVAL;
++	}
++	x_map = x_va + (vm_offset_t)(x_blk - x_pa);
++	y_map = y_va + (vm_offset_t)(y_blk - y_pa);
++
++	l1 = (uint64_t *)pt_va;
++	l2a = (uint64_t *)(pt_va + 0x1000);
++	l2b = (uint64_t *)(pt_va + 0x2000);
++	l1[0] = (pt_pa + 0x1000) | SMMU_PTE_TABLE;
++	l1[1] = (pt_pa + 0x2000) | SMMU_PTE_TABLE;
++	l2a[0] = x_blk | SMMU_PTE_BLOCK_ATTR;
++	l2b[0x100] = y_blk | SMMU_PTE_BLOCK_ATTR;
++	flush_dcache(pt_va, 0x3000, FALSE);
++
++	ttbr0 = (1ull << 48) | (pt_pa & 0x0000fffffffff000ull);
++	scr0 = gpu_rd(s, SMMU_GR0_sCR0);
++	gpu_wr(s, SMMU_GR0_sCR0, scr0 | 1u);	/* CLIENTPD while programming */
++	gpu_smmu_tlb(s);
++
++	gpu_wr(s, 0x1000u, 0x1f300u);		/* CBAR0: S1, WB, no-share */
++	gpu_wr(s, 0x1800u, 0x1u);		/* CBA2R0: 64-bit TTBR */
++	gpu_wr(s, 0x8000u + 0x10u, 0);		/* TCR2 */
++	gpu_wr(s, 0x8000u + 0x30u, 0x803520u);	/* TCR: 4K, T0SZ 32, WB */
++	gpu_wr(s, 0x8000u + 0x20u, (uint32_t)ttbr0);
++	gpu_wr(s, 0x8000u + 0x24u, (uint32_t)(ttbr0 >> 32));
++	gpu_wr(s, 0x8000u + 0x28u, 0);
++	gpu_wr(s, 0x8000u + 0x2cu, 0);
++	gpu_wr(s, 0x8000u + 0x38u, 0x0000ff00u);	/* MAIR0: attr1 WB */
++	gpu_wr(s, 0x8000u + 0x3cu, 0);
++	gpu_wr(s, 0x8000u + 0x0u, 0x1067u);	/* SCTLR: M, AFE, TRE, CFIE */
++
++	gpu_wr(s, SMMU_GR0_SMR(0), 0x80000004u);	/* SID 4 */
++	gpu_wr(s, SMMU_GR0_S2CR(0), 0x0u);	/* translation, CB0 */
++	gpu_wr(s, SMMU_GR0_SMR(1), 0x80000005u);	/* SID 5 */
++	gpu_wr(s, SMMU_GR0_S2CR(1), 0x0u);
++	gpu_wr(s, SMMU_GR0_sGFSR, 0xffffffffu);
++	gpu_smmu_tlb(s);
++	gpu_wr(s, SMMU_GR0_sCR0, scr0 & ~1u);	/* enable client port */
++
++	printf("SWEET GPU: smmu map x=%#x/%#x y=%#x/%#x blk=%#x/%#x l1=%#x/%#x\n",
++	    (uint32_t)x_pa, (uint32_t)(x_pa >> 32), (uint32_t)y_pa,
++	    (uint32_t)(y_pa >> 32), (uint32_t)x_blk, (uint32_t)y_blk,
++	    (uint32_t)pt_pa, (uint32_t)(pt_pa >> 32));
++	printf("SWEET GPU: smmu cb0 cbar=%#x sctlr=%#x ttbr=%#x/%#x tcr=%#x s2cr=%#x/%#x\n",
++	    gpu_rd(s, 0x1000u), gpu_rd(s, 0x8000u),
++	    gpu_rd(s, 0x8024u), gpu_rd(s, 0x8020u), gpu_rd(s, 0x8030u),
++	    gpu_rd(s, SMMU_GR0_S2CR(0)), gpu_rd(s, SMMU_GR0_S2CR(1)));
++
++	*fw_va = x_map;
++	*hfi_va = y_map;
++	return 0;
++}
++
+ /*
+  * The GMU firmware rides in the payload ramdisk: mkpayload adds a
+  * /chosen/memory-map "RAMDisk" range, so no vendor blob enters git. The
+@@ -355,8 +485,8 @@ gpu_boot_gmu(vm_offset_t gpucc)
+ 	uint32_t fw_len = 0;
+ 	const uint8_t *fw = gpu_fw_image(&fw_len);
+ 	uint32_t cx_before, gx_before;
+-	vm_offset_t gmu;
+-	uint32_t off, itcm = 0, dtcm = 0, skipped = 0;
++	vm_offset_t gmu, fw_va = 0, hfi_va = 0;
++	uint32_t off, itcm = 0, dtcm = 0, bo = 0, skipped = 0;
+ 
+ 	if (fw == 0) {
+ 		printf("SWEET GPU: no GMU firmware RAMDisk; skipping CM3 boot\n");
+@@ -371,6 +501,12 @@ gpu_boot_gmu(vm_offset_t gpucc)
+ 		printf("SWEET GPU: GMU mapping failed\n");
+ 		goto restore;
+ 	}
++	vm_offset_t smmu = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
++	if (smmu == 0 || gpu_smmu_setup(smmu, &fw_va, &hfi_va) != 0) {
++		printf("SWEET GPU: SMMU setup failed; BO blocks will be skipped\n");
++		fw_va = 0;
++		hfi_va = 0;
++	}
+ 
+ 	gpu_wr(gmu, GMU_GENERAL_7, 1);
+ 	for (off = 0; off + 16 <= fw_len; ) {
+@@ -378,7 +514,10 @@ gpu_boot_gmu(vm_offset_t gpucc)
+ 		uint32_t size = gpu_fw_rd32(fw, off + 4);
+ 		const uint8_t *data = fw + off + 16;
+ 
+-		if (size == 0 || (size & 3u) || size > fw_len - off - 16) {
++		if (size == 0) {
++			break;	/* page-aligned RAMDisk tail */
++		}
++		if ((size & 3u) || size > fw_len - off - 16) {
+ 			printf("SWEET GPU: bad GMU fw block off=%#x addr=%#x size=%#x\n",
+ 			    off, addr, size);
+ 			break;
+@@ -396,13 +535,33 @@ gpu_boot_gmu(vm_offset_t gpucc)
+ 				    (addr - 0x40000u) + i, gpu_fw_rd32(data, i));
+ 			}
+ 			dtcm += size;
++		} else if (fw_va && addr < 0x200000u &&
++		    size <= 0x200000u - addr) {
++			for (uint32_t i = 0; i < size; i += 4) {
++				*(uint32_t *)(fw_va + addr + i) =
++				    gpu_fw_rd32(data, i);
++			}
++			bo += size;
++		} else if (hfi_va && addr >= 0x60000000u &&
++		    addr < 0x60200000u && size <= 0x60200000u - addr) {
++			for (uint32_t i = 0; i < size; i += 4) {
++				*(uint32_t *)(hfi_va + (addr - 0x60000000u) + i) =
++				    gpu_fw_rd32(data, i);
++			}
++			bo += size;
+ 		} else {
+ 			skipped += size;
+ 		}
+ 		off += 16 + size;
+ 	}
+-	printf("SWEET GPU: gmu fw itcm=%#x dtcm=%#x skipped=%#x size=%#x\n",
+-	    itcm, dtcm, skipped, fw_len);
++	if (fw_va) {
++		flush_dcache(fw_va, 0x200000, FALSE);
++	}
++	if (hfi_va) {
++		flush_dcache(hfi_va, 0x200000, FALSE);
++	}
++	printf("SWEET GPU: gmu fw itcm=%#x dtcm=%#x bo=%#x skipped=%#x size=%#x\n",
++	    itcm, dtcm, bo, skipped, fw_len);
+ 
+ 	uint32_t last = gpu_rd(gmu, GMU_DTCM_LAST);
+ 	uint32_t mask = 0xffffffffu, reset = 0xbabefaceu;

@@ -1,0 +1,100 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 876ccac..b6ca93e 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -515,6 +515,87 @@ gpu_hfi_init(vm_offset_t hfi)
+ 	q1[8] = 1; q1[9] = 0; q1[10] = 0; q1[11] = 0;
+ }
+ 
++static void
++gpu_reg(vm_offset_t base, uint32_t dword, uint32_t value)
++{
++	gpu_wr(base, dword * 4u, value);
++}
++
++/*
++ * a6xx_gmu_rpmh_init for a640: RSCC sequencer uCode + PDC sequencer uCode
++ * and the PDC TCS commands that release/retain the GMU power state. The live
++ * DT gives PDC cfg 0xb290000 and PDC seq 0xb490000; the RSCC is the AP RSC
++ * at 0x18220000 (same block the ARC votes use). a640 uses PDC address 0x30090.
++ */
++static void
++gpu_rpmh_init(void)
++{
++	vm_offset_t rscc = ml_io_map(0x18220000u, 0x10000u);
++	vm_offset_t pdc = ml_io_map(0xb290000u, 0x10000u);
++	vm_offset_t seq = ml_io_map(0xb490000u, 0x10000u);
++
++	if (rscc == 0 || pdc == 0 || seq == 0) {
++		printf("SWEET GPU: RSCC/PDC mapping failed\n");
++		return;
++	}
++	/* Disable SDE clock gating and set up the RSC/PDC handshake. */
++	gpu_reg(rscc, 0x4, 1u << 24);
++	gpu_reg(rscc, 0xb, 1);
++	gpu_reg(rscc, 0xe, 0);
++	gpu_reg(rscc, 0xd, 0);
++	gpu_reg(rscc, 0xe + 2, 0);
++	gpu_reg(rscc, 0xd + 2, 0);
++	gpu_reg(rscc, 0xe + 4, 0x80000000u);
++	gpu_reg(rscc, 0xd + 4, 0);
++	gpu_reg(rscc, 0x100, 0);
++	gpu_reg(rscc, 0x8, 0x4520);
++	gpu_reg(rscc, 0x9, 0x4510);
++	gpu_reg(rscc, 0xa, 0x4514);
++	/* RSC sequencer uCode (a640 uses the non-a650 sequence). */
++	gpu_reg(rscc, 0x180, 0xa7a506a0u);
++	gpu_reg(rscc, 0x181, 0xa1e6a6e7u);
++	gpu_reg(rscc, 0x182, 0xa2e081e1u);
++	gpu_reg(rscc, 0x183, 0xe9a982e2u);
++	gpu_reg(rscc, 0x184, 0x0020e8a8u);
++	/* PDC sequencer uCode. */
++	gpu_reg(seq, 0x0, 0xfebea1e1u);
++	gpu_reg(seq, 0x1, 0xa5a4a3a2u);
++	gpu_reg(seq, 0x2, 0x8382a6e0u);
++	gpu_reg(seq, 0x3, 0xbce3e284u);
++	gpu_reg(seq, 0x4, 0x002081fcu);
++	/* PDC TCS1: sleep sequence. */
++	gpu_reg(pdc, 0x1573, 7);
++	gpu_reg(pdc, 0x1574, 0);
++	gpu_reg(pdc, 0x1572, 0);
++	gpu_reg(pdc, 0x1575, 0x10108);
++	gpu_reg(pdc, 0x1576, 0x30010);
++	gpu_reg(pdc, 0x1577, 1);
++	gpu_reg(pdc, 0x1579, 0x10108);
++	gpu_reg(pdc, 0x157a, 0x30000);
++	gpu_reg(pdc, 0x157b, 0);
++	gpu_reg(pdc, 0x157d, 0x10108);
++	gpu_reg(pdc, 0x157e, 0x30090);
++	gpu_reg(pdc, 0x157f, 0);
++	/* PDC TCS3: wake sequence. */
++	gpu_reg(pdc, 0x15d7, 7);
++	gpu_reg(pdc, 0x15d8, 0);
++	gpu_reg(pdc, 0x15d6, 0);
++	gpu_reg(pdc, 0x15d9, 0x10108);
++	gpu_reg(pdc, 0x15da, 0x30010);
++	gpu_reg(pdc, 0x15db, 2);
++	gpu_reg(pdc, 0x15dd, 0x10108);
++	gpu_reg(pdc, 0x15de, 0x30000);
++	gpu_reg(pdc, 0x15df, 3);
++	gpu_reg(pdc, 0x15e1, 0x10108);
++	gpu_reg(pdc, 0x15e2, 0x30090);
++	gpu_reg(pdc, 0x15e3, 3);
++	gpu_reg(pdc, 0x1148, 0);
++	gpu_reg(pdc, 0x1140, 0x80000001u);
++	__asm__ volatile("dsb sy" ::: "memory");
++	printf("SWEET GPU: rscc/pdc uCode loaded rscc=%#x pdc=%#x seq=%#x\n",
++	    (uint32_t)rscc, (uint32_t)pdc, (uint32_t)seq);
++}
++
+ /*
+  * Load the firmware blocks and cold-boot the CM3. The GMU RCG is left at XO
+  * (19.2 MHz) here: the earlier 200 MHz GPLL0 setting may have no live parent
+@@ -582,6 +663,7 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 	}
+ 
+ 	gpu_wr(gmu, GMU_GENERAL_7, 1);
++	gpu_rpmh_init();
+ 	for (off = 0; off + 16 <= fw_len; ) {
+ 		uint32_t addr = gpu_fw_rd32(fw, off);
+ 		uint32_t size = gpu_fw_rd32(fw, off + 4);

@@ -1,0 +1,27 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index b6ca93e..f1b56e7 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -99,6 +99,7 @@ void sweet_gpu_init(void);
+ #define GMU_CM3_SYSRESET	(0x5000u * 4u)
+ #define GMU_CM3_BOOT_CONFIG	(0x5001u * 4u)
+ #define GMU_CM3_FW_INIT_RESULT	(0x501cu * 4u)
++#define GMU_CM3_CFG		(0x502du * 4u)
+ #define GMU_HFI_CTRL_STATUS	(0x5180u * 4u)
+ #define GMU_GMU2HOST_INTR_INFO	(0x5192u * 4u)
+ #define GMU_GENERAL_7		(0x51ccu * 4u)
+@@ -731,9 +732,12 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 	gpu_wr(gmu, GMU_CM3_BOOT_CONFIG, 0x02);
+ 	gpu_wr(gmu, GMU_HFI_QTBL_ADDR, hfi_va ? 0x60001000u : 0);
+ 	gpu_wr(gmu, GMU_HFI_QTBL_INFO, hfi_va ? 1u : 0);
+-	gpu_wr(gmu, GMU_AHB_FENCE_RANGE_0, (1u << 31) | (0xau << 18) | 0xa0u);
++	gpu_wr(gmu, GMU_AHB_FENCE_RANGE_0, 0x80a008a0u);
+ 	gpu_wr(gmu, GMU_HFI_SFR_ADDR, 0x06040100u);
+-	/* a6xx_gmu_power_config; the RSCC uCode is not loaded yet. */
++	/* Clear the CM3 NMI bit so the CM3 runs __main, not the NMI handler. */
++	gpu_wr(gmu, GMU_CM3_CFG, 0x4052u);
++	printf("SWEET GPU: gmu cm3-cfg=%#x\n", gpu_rd(gmu, GMU_CM3_CFG));
++	/* a6xx_gmu_power_config. */
+ 	gpu_wr(gmu, GMU_SYS_BUS_CONFIG, 1);
+ 	gpu_wr(gmu, GMU_ICACHE_CONFIG, 1);
+ 	gpu_wr(gmu, GMU_DCACHE_CONFIG, 1);

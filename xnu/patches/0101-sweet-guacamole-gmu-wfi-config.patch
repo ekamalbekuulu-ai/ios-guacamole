@@ -1,0 +1,21 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index f1b56e7..3cdb10a 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -100,6 +100,7 @@ void sweet_gpu_init(void);
+ #define GMU_CM3_BOOT_CONFIG	(0x5001u * 4u)
+ #define GMU_CM3_FW_INIT_RESULT	(0x501cu * 4u)
+ #define GMU_CM3_CFG		(0x502du * 4u)
++#define GMU_CX_GMU_WFI_CONFIG	(0x5002u * 4u)
+ #define GMU_HFI_CTRL_STATUS	(0x5180u * 4u)
+ #define GMU_GMU2HOST_INTR_INFO	(0x5192u * 4u)
+ #define GMU_GENERAL_7		(0x51ccu * 4u)
+@@ -752,6 +753,8 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 	    gpu_rd(gmu, GMU_GENERAL_7), gpu_rd(gmu, GMU_CM3_ITCM_START));
+ 	gpu_wr(gmu, GMU_CM3_SYSRESET, 1);
+ 	gpu_wr(gmu, GMU_CM3_PWR_COL_CP_RESP, 0);
++	/* Vendor a640 a6xx_gmu_start(): leave WFI before __main can run. */
++	gpu_wr(gmu, GMU_CX_GMU_WFI_CONFIG, 0);
+ 	gpu_wr(gmu, GMU_CM3_SYSRESET, 0);
+ 	printf("SWEET GPU: gmu reset-after=%#x\n",
+ 	    gpu_rd(gmu, GMU_CM3_SYSRESET));

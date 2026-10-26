@@ -1,0 +1,217 @@
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index df97808..2d8d587 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -328,9 +328,15 @@ rh_free(unsigned t)
+ }
+ 
+ static int
+-rh_send(uint32_t address, unsigned mv)
++rh_send_cmds(uint32_t address, const uint32_t *offsets, const uint32_t *values,
++    unsigned count, const char *label)
+ {
+ 	int chosen = -1;
++
++	if (count == 0 || count > 3 || count > rh_ncpt || !offsets || !values ||
++	    !label) {
++		return EINVAL;
++	}
+ 	for (unsigned t = 0; t < RH_ACTIVE_N; ++t) {
+ 		uint32_t b = t * RH_TCS_STRIDE;
+ 		uint32_t enabled = rh_read(rh_tcs, b + RH_ENABLE);
+@@ -343,7 +349,8 @@ rh_send(uint32_t address, unsigned mv)
+ 		for (unsigned c = 0; c < rh_ncpt; ++c) {
+ 			if ((enabled & (1u << c)) &&
+ 			    (rh_read(rh_tcs, b + RH_ADDR + c * RH_CMD_STRIDE) & ~15u) == address) {
+-				printf("SWEET RPMH: conflicting inherited L11C request in TCS%u\n", t);
++				printf("SWEET RPMH: conflicting inherited %s request in TCS%u\n",
++				    label, t);
+ 				return EBUSY;
+ 			}
+ 		}
+@@ -375,11 +382,8 @@ rh_send(uint32_t address, unsigned mv)
+ 	}
+ 	/* From here an uncertain write/timeout quarantines our slot for this boot. */
+ 	rh_poisoned = true;
+-	/* HPM (raw 7) is supported by this PMIC5 LDO; enable comes last. */
+-	const uint32_t offsets[3] = {0, 8, 4};
+-	const uint32_t values[3] = {mv, 7, 1};
+-	printf("SWEET RPMH: TCS%u ACTIVE %u mV mode=7 enable=1 irq-enable=%#x\n", t, mv, irq_en);
+-	for (unsigned c = 0; c < 3; ++c) {
++	printf("SWEET RPMH: TCS%u ACTIVE %s irq-enable=%#x\n", t, label, irq_en);
++	for (unsigned c = 0; c < count; ++c) {
+ 		uint32_t cmd = b + c * RH_CMD_STRIDE;
+ 		if (!rh_sync(cmd + RH_MSGID, RH_WRITE_ACK) ||
+ 		    !rh_sync(cmd + RH_ADDR, address + offsets[c]) ||
+@@ -387,7 +391,9 @@ rh_send(uint32_t address, unsigned mv)
+ 			return EIO;
+ 		}
+ 	}
+-	if (!rh_sync(b + RH_WAIT, 7) || !rh_sync(b + RH_ENABLE, 7) ||
++	uint32_t command_mask = (1u << count) - 1u;
++	if (!rh_sync(b + RH_WAIT, command_mask) ||
++	    !rh_sync(b + RH_ENABLE, command_mask) ||
+ 	    !rh_sync(b + RH_CONTROL, 0) || !rh_sync(b + RH_CONTROL, RH_AMC_EN)) {
+ 		return EIO;
+ 	}
+@@ -398,7 +404,7 @@ rh_send(uint32_t address, unsigned mv)
+ 		irq = rh_read(rh_tcs, RH_IRQ_STATUS);
+ 		idle = rh_read(rh_tcs, b + RH_STATUS);
+ 		bool complete = true;
+-		for (unsigned c = 0; c < 3; ++c) {
++		for (unsigned c = 0; c < count; ++c) {
+ 			status[c] = rh_read(rh_tcs, b + RH_CMD_STATUS + c * RH_CMD_STRIDE);
+ 			complete &= status[c] != 0xffffffffu &&
+ 			    (status[c] & (RH_ISSUED | RH_COMPLETE)) == (RH_ISSUED | RH_COMPLETE);
+@@ -429,10 +435,95 @@ rh_send(uint32_t address, unsigned mv)
+ 		return EIO;
+ 	}
+ 	rh_poisoned = false;
+-	printf("SWEET RPMH: L11C ACTIVE vote complete (rail voltage requires hardware verification)\n");
++	printf("SWEET RPMH: %s ACTIVE vote complete (rail state requires hardware verification)\n",
++	    label);
+ 	return 0;
+ }
+ 
++static int
++rh_send(uint32_t address, unsigned mv)
++{
++	const uint32_t offsets[3] = {0, 8, 4};
++	const uint32_t values[3] = {mv, 7, 1};
++	char label[40];
++
++	/* HPM (raw 7) is supported by this PMIC5 LDO; enable comes last. */
++	snprintf(label, sizeof(label), "L11C %u mV mode=7 enable=1", mv);
++	return rh_send_cmds(address, offsets, values, 3, label);
++}
++
++/*
++ * Vote an ARC rail through RPMh. corner is the index into the resource's
++ * command-DB level table (rpmhpd.c sends cmd.data = corner), not the GMU
++ * HFI packed vote. -1 selects the first non-zero level (rpmhpd's
++ * enable_corner); 0 votes the rail off.
++ */
++int
++sweet_rpmh_arc_set(const char *res, int corner)
++{
++	uint32_t address = 0, table = 0, bytes = 0;
++	unsigned count, i;
++	int error = EIO;
++
++	if (!res) {
++		return EINVAL;
++	}
++	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
++		return EBUSY;
++	}
++	if (rh_poisoned) {
++		printf("SWEET RPMH: previous uncertain transaction; refusing ARC vote\n");
++		goto out;
++	}
++	error = rh_map();
++	if (error) {
++		goto out;
++	}
++	error = rh_arc_lookup(res, &address, &table, &bytes);
++	if (error) {
++		goto out;
++	}
++	count = bytes / 2;
++	if (corner < 0) {
++		i = 0;
++		if (!rh_db16(table)) {
++			for (i = 1; i < count && !rh_db16(table + 2u * i); ++i) {
++			}
++		}
++		if (i == count) {
++			printf("SWEET RPMH: %s has no non-zero ARC level\n", res);
++			error = ENODEV;
++			goto out;
++		}
++		corner = (int)i;
++	}
++	if ((unsigned)corner >= count) {
++		printf("SWEET RPMH: %s ARC corner %d out of range (%u levels)\n",
++		    res, corner, count);
++		error = EINVAL;
++		goto out;
++	}
++	const uint32_t offsets[1] = {0};
++	const uint32_t values[1] = {(uint32_t)corner};
++	char label[48];
++
++	snprintf(label, sizeof(label), "%s ARC corner %d %s", res, corner,
++	    corner ? "on" : "off");
++	error = rh_send_cmds(address, offsets, values, 1, label);
++out:
++	if (error) {
++		printf("SWEET RPMH: ARC %s corner %d failed errno=%d",
++		    res ? res : "?", corner, error);
++		if (corner < 0) {
++			printf(" (auto)\n");
++		} else {
++			printf("\n");
++		}
++	}
++	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
++	return error;
++}
++
+ int
+ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
+ {
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 71c9bc6..20b0eea 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -8,6 +8,8 @@
+  *                and read the GPU's RBBM liveness registers
+  *   sweetgpu=3   additionally power the GX head switch (vendor SW reset +
+  *                AON reset + clamp sequence), read RBBM, then collapse GX
++ *   sweetgpu=4   additionally vote the gfx.lvl ARC rail on before the GX
++ *                sequence, then vote it off after the probe
+  *
+  * The ABL leaves gcc_gpu_cfg_ahb_clk gated. Reading the GPUCC register block
+  * in that state wedges the interconnect: the shim probe did exactly that and
+@@ -36,6 +38,7 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_rpmh_arc_dump(void);
++extern int sweet_rpmh_arc_set(const char *res, int corner);
+ void sweet_gpu_init(void);
+ 
+ #define GPU_GCC_PA		0x00100000u
+@@ -294,7 +297,32 @@ sweet_gpu_init(void)
+ 			if (stage >= 3) {
+ 				sweet_rpmh_arc_dump();
+ 			}
+-			if (stage >= 3 && gpu_power_gx(gpucc)) {
++			if (stage >= 4) {
++				/* gfx.lvl levels 16/48/64 from the 0087 hardware dump. */
++				static const int corners[] = {1, 2, 3};
++				bool probed = false;
++
++				for (unsigned i = 0;
++				    i < sizeof(corners) / sizeof(corners[0]); ++i) {
++					if (sweet_rpmh_arc_set("gfx.lvl", corners[i]) != 0) {
++						break;
++					}
++					printf("SWEET GPU: gfx.lvl corner %d on; trying GX\n",
++					    corners[i]);
++					if (gpu_power_gx(gpucc)) {
++						gpu_probe_core();
++						gpu_power_down_gx(gpucc);
++						probed = true;
++						break;
++					}
++				}
++				if (!probed) {
++					printf("SWEET GPU: no gfx.lvl corner powered GX\n");
++				}
++				if (sweet_rpmh_arc_set("gfx.lvl", 0) != 0) {
++					printf("SWEET GPU: gfx.lvl vote off failed\n");
++				}
++			} else if (stage >= 3 && gpu_power_gx(gpucc)) {
+ 				gpu_probe_core();
+ 				gpu_power_down_gx(gpucc);
+ 			}

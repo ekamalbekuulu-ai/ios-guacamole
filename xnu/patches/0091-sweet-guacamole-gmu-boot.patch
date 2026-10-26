@@ -1,0 +1,192 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 7db84d0..edf812f 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -13,6 +13,8 @@
+  *   sweetgpu=5   additionally enable the GMU CX/GX clocks and read the GMU
+  *                firmware/reset/HFI registers (read-only)
+  *   sweetgpu=6   additionally read the GPU SMMU ID/global/SID/context state
++ *   sweetgpu=7   additionally load a640_gmu.bin from the payload RAMDisk into
++ *                ITCM/DTCM and cold-boot the CM3 (no HFI yet)
+  *
+  * The ABL leaves gcc_gpu_cfg_ahb_clk gated. Reading the GPUCC register block
+  * in that state wedges the interconnect: the shim probe did exactly that and
+@@ -37,6 +39,7 @@
+ #include <kern/clock.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
+ #include <pexpert/arm64/sweet_dev.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+@@ -97,6 +100,17 @@ void sweet_gpu_init(void);
+ #define GMU_GENERAL_7		(0x51ccu * 4u)
+ #define GMU_AO_HOST_INTR_STATUS	(0x9305u * 4u)
+ #define GMU_AHB_FENCE_STATUS	(0x9313u * 4u)
++#define GMU_CM3_ITCM_START	(0x0c00u * 4u)
++#define GMU_CM3_DTCM_START	(0x1c00u * 4u)
++#define GMU_CM3_PWR_COL_CP_RESP	(0x5101u * 4u)
++#define GMU_HFI_SFR_ADDR	(0x5182u * 4u)
++#define GMU_HFI_QTBL_INFO	(0x5184u * 4u)
++#define GMU_HFI_QTBL_ADDR	(0x5185u * 4u)
++#define GMU_GMU2HOST_INTR_CLR	(0x5191u * 4u)
++#define GMU_GMU2HOST_INTR_MASK	(0x5193u * 4u)
++#define GMU_AO_HOST_INTR_CLR	(0x9304u * 4u)
++#define GMU_AO_HOST_INTR_MASK	(0x9306u * 4u)
++#define GMU_AHB_FENCE_RANGE_0	(0x9311u * 4u)
+ 
+ /* GPU SMMU (SMMU-500), GR0 global and stream-match registers. */
+ #define GPU_SMMU_PA		0x02ca0000u
+@@ -299,6 +313,142 @@ gpu_probe_smmu(void)
+ 	}
+ }
+ 
++/*
++ * The GMU firmware rides in the payload ramdisk: mkpayload adds a
++ * /chosen/memory-map "RAMDisk" range, so no vendor blob enters git. The
++ * firmware is a sequence of {addr, size, type, value, data[]} blocks.
++ */
++static const uint8_t *
++gpu_fw_image(uint32_t *length)
++{
++	DTEntry entry;
++	const void *prop = 0;
++	unsigned int size = 0;
++
++	if (SecureDTLookupEntry(0, "/chosen/memory-map", &entry) != kSuccess ||
++	    SecureDTGetProperty(entry, "RAMDisk", &prop, &size) != kSuccess ||
++	    !prop || size < sizeof(DTMemoryMapRange)) {
++		return 0;
++	}
++	const DTMemoryMapRange *range = prop;
++	if (range->paddr == 0 || range->length < 32) {
++		return 0;
++	}
++	*length = (uint32_t)range->length;
++	return (const uint8_t *)ml_io_map((vm_offset_t)range->paddr, range->length);
++}
++
++static uint32_t
++gpu_fw_rd32(const uint8_t *fw, uint32_t off)
++{
++	return *(const volatile uint32_t *)(fw + off);
++}
++
++/*
++ * Load the ITCM/DTCM blocks and cold-boot the CM3. icache/dcache and HFI
++ * need the GPU SMMU (SIDs 4/5 currently fault), so they are skipped here;
++ * the goal is only FW_INIT_RESULT. The CM3 is reset again afterwards.
++ */
++static void
++gpu_boot_gmu(vm_offset_t gpucc)
++{
++	uint32_t fw_len = 0;
++	const uint8_t *fw = gpu_fw_image(&fw_len);
++	uint32_t cx_before, gx_before;
++	vm_offset_t gmu;
++	uint32_t off, itcm = 0, dtcm = 0, skipped = 0;
++
++	if (fw == 0) {
++		printf("SWEET GPU: no GMU firmware RAMDisk; skipping CM3 boot\n");
++		return;
++	}
++	cx_before = gpu_rd(gpucc, GPUCC_CX_GMU_CLK);
++	gx_before = gpu_rd(gpucc, GPUCC_GX_GMU_CLK);
++	gpu_enable_branch(gpucc, GPUCC_CX_GMU_CLK, "gpu_cc_cx_gmu_clk");
++	gpu_enable_branch(gpucc, GPUCC_GX_GMU_CLK, "gpu_cc_gx_gmu_clk");
++	gmu = ml_io_map(GPU_GMU_PA, GPU_GMU_SIZE);
++	if (gmu == 0) {
++		printf("SWEET GPU: GMU mapping failed\n");
++		goto restore;
++	}
++
++	gpu_wr(gmu, GMU_GENERAL_7, 1);
++	for (off = 0; off + 16 <= fw_len; ) {
++		uint32_t addr = gpu_fw_rd32(fw, off);
++		uint32_t size = gpu_fw_rd32(fw, off + 4);
++		const uint8_t *data = fw + off + 16;
++
++		if (size == 0 || (size & 3u) || size > fw_len - off - 16) {
++			printf("SWEET GPU: bad GMU fw block off=%#x addr=%#x size=%#x\n",
++			    off, addr, size);
++			break;
++		}
++		if (addr < 0x4000u && size <= 0x4000u - addr) {
++			for (uint32_t i = 0; i < size; i += 4) {
++				gpu_wr(gmu, GMU_CM3_ITCM_START + addr + i,
++				    gpu_fw_rd32(data, i));
++			}
++			itcm += size;
++		} else if (addr >= 0x40000u && addr < 0x44000u &&
++		    size <= 0x44000u - addr) {
++			for (uint32_t i = 0; i < size; i += 4) {
++				gpu_wr(gmu, GMU_CM3_DTCM_START +
++				    (addr - 0x40000u) + i, gpu_fw_rd32(data, i));
++			}
++			dtcm += size;
++		} else {
++			skipped += size;
++		}
++		off += 16 + size;
++	}
++	printf("SWEET GPU: gmu fw itcm=%#x dtcm=%#x skipped=%#x size=%#x\n",
++	    itcm, dtcm, skipped, fw_len);
++
++	uint32_t last = gpu_rd(gmu, GMU_DTCM_LAST);
++	uint32_t mask = 0xffffffffu, reset = 0xbabefaceu;
++	if (last > 0x20010004u) {
++		mask = 0x1ffu;
++		reset = 0x100u;
++	}
++	gpu_wr(gmu, GMU_CM3_FW_INIT_RESULT, 0);
++	gpu_wr(gmu, GMU_CM3_BOOT_CONFIG, 0x02);
++	gpu_wr(gmu, GMU_HFI_QTBL_ADDR, 0);
++	gpu_wr(gmu, GMU_HFI_QTBL_INFO, 0);
++	gpu_wr(gmu, GMU_AHB_FENCE_RANGE_0, (1u << 31) | (0xau << 18) | 0xa0u);
++	gpu_wr(gmu, GMU_HFI_SFR_ADDR, 0x06040100u);
++	gpu_wr(gmu, GMU_CM3_SYSRESET, 1);
++	gpu_wr(gmu, GMU_CM3_PWR_COL_CP_RESP, 0);
++	gpu_wr(gmu, GMU_CM3_SYSRESET, 0);
++	uint32_t init = 0;
++	for (unsigned i = 0; i < 2000; ++i) {
++		init = gpu_rd(gmu, GMU_CM3_FW_INIT_RESULT);
++		if ((init & mask) == reset) {
++			break;
++		}
++		delay(1);
++	}
++	printf("SWEET GPU: gmu boot last=%#x want=%#x/%#x init=%#x %s\n",
++	    last, reset, mask, init,
++	    ((init & mask) == reset) ? "ok" : "timeout");
++	printf("SWEET GPU: gmu boot intr=%#x gmu2host=%#x hfi=%#x\n",
++	    gpu_rd(gmu, GMU_AO_HOST_INTR_STATUS),
++	    gpu_rd(gmu, GMU_GMU2HOST_INTR_INFO),
++	    gpu_rd(gmu, GMU_HFI_CTRL_STATUS));
++	gpu_wr(gmu, GMU_CM3_SYSRESET, 1);	/* stop the CM3; bounded probe */
++restore:
++	if (!(cx_before & 1u)) {
++		gpu_wr(gpucc, GPUCC_CX_GMU_CLK,
++		    gpu_rd(gpucc, GPUCC_CX_GMU_CLK) & ~1u);
++	}
++	if (!(gx_before & 1u)) {
++		gpu_wr(gpucc, GPUCC_GX_GMU_CLK,
++		    gpu_rd(gpucc, GPUCC_GX_GMU_CLK) & ~1u);
++	}
++	printf("SWEET GPU: gmu boot clocks after cx=%#x gx=%#x\n",
++	    gpu_rd(gpucc, GPUCC_CX_GMU_CLK),
++	    gpu_rd(gpucc, GPUCC_GX_GMU_CLK));
++}
++
+ /*
+  * Power the GX head switch for a bounded register probe. This is the vendor
+  * gdsc-regulator enable sequence (SW reset, AON reset, deassert clamp, clear
+@@ -443,6 +593,9 @@ sweet_gpu_init(void)
+ 						if (stage >= 6) {
+ 							gpu_probe_smmu();
+ 						}
++						if (stage >= 7) {
++							gpu_boot_gmu(gpucc);
++						}
+ 						gpu_power_down_gx(gpucc);
+ 						probed = true;
+ 						break;

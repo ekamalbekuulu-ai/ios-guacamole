@@ -1,0 +1,215 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 3cdb10a..2ce04e6 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -529,7 +529,7 @@ gpu_reg(vm_offset_t base, uint32_t dword, uint32_t value)
+  * DT gives PDC cfg 0xb290000 and PDC seq 0xb490000; the RSCC is the AP RSC
+  * at 0x18220000 (same block the ARC votes use). a640 uses PDC address 0x30090.
+  */
+-static void
++static vm_offset_t
+ gpu_rpmh_init(void)
+ {
+ 	vm_offset_t rscc = ml_io_map(0x18220000u, 0x10000u);
+@@ -538,7 +538,7 @@ gpu_rpmh_init(void)
+ 
+ 	if (rscc == 0 || pdc == 0 || seq == 0) {
+ 		printf("SWEET GPU: RSCC/PDC mapping failed\n");
+-		return;
++		return 0;
+ 	}
+ 	/* Disable SDE clock gating and set up the RSC/PDC handshake. */
+ 	gpu_reg(rscc, 0x4, 1u << 24);
+@@ -596,6 +596,44 @@ gpu_rpmh_init(void)
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	printf("SWEET GPU: rscc/pdc uCode loaded rscc=%#x pdc=%#x seq=%#x\n",
+ 	    (uint32_t)rscc, (uint32_t)pdc, (uint32_t)seq);
++	return rscc;
++}
++
++/* Vendor a640 a6xx_rpmh_power_on_gpu: ACK the RSC and wait for seq idle. */
++static bool
++gpu_rscc_handshake(vm_offset_t gmu, vm_offset_t rscc)
++{
++	uint32_t ack = 0, busy = 1;
++
++	if (rscc == 0) {
++		return false;
++	}
++	gpu_wr(gmu, 0x9307u * 4u, 1u << 1);
++	for (unsigned i = 0; i < 100; ++i) {
++		ack = gpu_rd(gmu, 0x9308u * 4u);
++		if (ack & (1u << 1)) {
++			break;
++		}
++		delay(1);
++	}
++	if (!(ack & (1u << 1))) {
++		printf("SWEET GPU: rscc no ack=%#x\n", ack);
++		return false;
++	}
++	for (unsigned i = 0; i < 100; ++i) {
++		busy = gpu_rd(rscc, 0x101u * 4u);
++		if (!busy) {
++			break;
++		}
++		delay(1);
++	}
++	if (busy) {
++		printf("SWEET GPU: rscc seq busy=%#x\n", busy);
++		return false;
++	}
++	gpu_wr(gmu, 0x9307u * 4u, 0);
++	printf("SWEET GPU: rscc ack=%#x busy=%#x\n", ack, busy);
++	return true;
+ }
+ 
+ /*
+@@ -610,8 +648,9 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 	uint32_t fw_len = 0;
+ 	const uint8_t *fw = gpu_fw_image(&fw_len);
+ 	uint32_t cx_before, gx_before, parent, cmd_before, cfg_before;
+-	vm_offset_t gmu, fw_va = 0, hfi_va = 0;
+-	uint32_t off, itcm = 0, dtcm = 0, bo = 0, skipped = 0;
++	vm_offset_t gmu, fw_va = 0, hfi_va = 0, smmu = 0, rscc = 0;
++	uint32_t off, itcm = 0, dtcm = 0, bo = 0, skipped = 0, fault = 0;
++	bool layout_ok = true, rscc_ok = false;
+ 
+ 	if (fw == 0) {
+ 		printf("SWEET GPU: no GMU firmware RAMDisk; skipping CM3 boot\n");
+@@ -657,15 +696,30 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 	int cxerr = sweet_rpmh_arc_set("cx.lvl", 2);
+ 	printf("SWEET GPU: cx.lvl corner 2 %s\n", cxerr ? "failed" : "on");
+ 
+-	vm_offset_t smmu = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
++	smmu = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
+ 	if (smmu == 0 || gpu_smmu_setup(smmu, &fw_va, &hfi_va) != 0) {
+-		printf("SWEET GPU: SMMU setup failed; BO blocks will be skipped\n");
++		printf("SWEET GPU: SMMU setup failed; BO blocks cannot land\n");
+ 		fw_va = 0;
+ 		hfi_va = 0;
++		layout_ok = false;
++	}
++	if (smmu) {
++		gpu_wr(smmu, 0x48u, ~0u);	/* clear sGFSR */
++		gpu_wr(smmu, 0x8058u, ~0u);	/* clear CB0 FSR */
++		fault = gpu_rd(smmu, 0x48u) | gpu_rd(smmu, 0x8058u);
++		printf("SWEET GPU: smmu faults start=%#x gfsr=%#x cb0=%#x\n",
++		    fault, gpu_rd(smmu, 0x48u), gpu_rd(smmu, 0x8058u));
++		if (fault) {
++			layout_ok = false;
++		}
+ 	}
+ 
+ 	gpu_wr(gmu, GMU_GENERAL_7, 1);
+-	gpu_rpmh_init();
++	rscc = gpu_rpmh_init();
++	rscc_ok = gpu_rscc_handshake(gmu, rscc);
++	printf("SWEET GPU: gmu fw head=%#x/%#x/%#x/%#x\n",
++	    gpu_fw_rd32(fw, 0), gpu_fw_rd32(fw, 4), gpu_fw_rd32(fw, 8),
++	    gpu_fw_rd32(fw, 12));
+ 	for (off = 0; off + 16 <= fw_len; ) {
+ 		uint32_t addr = gpu_fw_rd32(fw, off);
+ 		uint32_t size = gpu_fw_rd32(fw, off + 4);
+@@ -680,6 +734,7 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 			break;
+ 		}
+ 		if (addr < 0x4000u && size <= 0x4000u - addr) {
++			printf("SWEET GPU: fw block %#x+%#x -> ITCM\n", addr, size);
+ 			for (uint32_t i = 0; i < size; i += 4) {
+ 				gpu_wr(gmu, GMU_CM3_ITCM_START + addr + i,
+ 				    gpu_fw_rd32(data, i));
+@@ -687,6 +742,7 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 			itcm += size;
+ 		} else if (addr >= 0x40000u && addr < 0x44000u &&
+ 		    size <= 0x44000u - addr) {
++			printf("SWEET GPU: fw block %#x+%#x -> DTCM\n", addr, size);
+ 			for (uint32_t i = 0; i < size; i += 4) {
+ 				gpu_wr(gmu, GMU_CM3_DTCM_START +
+ 				    (addr - 0x40000u) + i, gpu_fw_rd32(data, i));
+@@ -694,6 +750,7 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 			dtcm += size;
+ 		} else if (fw_va && addr < 0x200000u &&
+ 		    size <= 0x200000u - addr) {
++			printf("SWEET GPU: fw block %#x+%#x -> DDR\n", addr, size);
+ 			for (uint32_t i = 0; i < size; i += 4) {
+ 				*(uint32_t *)(fw_va + addr + i) =
+ 				    gpu_fw_rd32(data, i);
+@@ -701,12 +758,15 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 			bo += size;
+ 		} else if (hfi_va && addr >= 0x60000000u &&
+ 		    addr < 0x60200000u && size <= 0x60200000u - addr) {
++			printf("SWEET GPU: fw block %#x+%#x -> HFI\n", addr, size);
+ 			for (uint32_t i = 0; i < size; i += 4) {
+ 				*(uint32_t *)(hfi_va + (addr - 0x60000000u) + i) =
+ 				    gpu_fw_rd32(data, i);
+ 			}
+ 			bo += size;
+ 		} else {
++			printf("SWEET GPU: fw block %#x+%#x -> NO FIT\n", addr, size);
++			layout_ok = false;
+ 			skipped += size;
+ 		}
+ 		off += 16 + size;
+@@ -722,6 +782,15 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 	}
+ 	printf("SWEET GPU: gmu fw itcm=%#x dtcm=%#x bo=%#x skipped=%#x size=%#x\n",
+ 	    itcm, dtcm, bo, skipped, fw_len);
++	if (smmu) {
++		uint32_t gfsr = gpu_rd(smmu, 0x48u);
++		uint32_t cbfsr = gpu_rd(smmu, 0x8058u);
++		printf("SWEET GPU: smmu faults copy gfsr=%#x cb0=%#x\n",
++		    gfsr, cbfsr);
++		if (gfsr || cbfsr) {
++			layout_ok = false;
++		}
++	}
+ 
+ 	uint32_t last = gpu_rd(gmu, GMU_DTCM_LAST);
+ 	uint32_t mask = 0xffffffffu, reset = 0xbabefaceu;
+@@ -729,6 +798,12 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 		mask = 0x1ffu;
+ 		reset = 0x100u;
+ 	}
++	if (!layout_ok || !rscc_ok) {
++		printf("SWEET GPU: GMU boot gated layout=%d rscc=%d; not resetting CM3\n",
++		    layout_ok, rscc_ok);
++		gpu_wr(gmu, GMU_CM3_SYSRESET, 1);
++		goto restore;
++	}
+ 	gpu_wr(gmu, GMU_CM3_FW_INIT_RESULT, 0);
+ 	gpu_wr(gmu, GMU_CM3_BOOT_CONFIG, 0x02);
+ 	gpu_wr(gmu, GMU_HFI_QTBL_ADDR, hfi_va ? 0x60001000u : 0);
+@@ -760,20 +835,28 @@ gpu_boot_gmu(vm_offset_t gpucc, vm_offset_t gcc)
+ 	    gpu_rd(gmu, GMU_CM3_SYSRESET));
+ 	uint32_t init = 0;
+ 	bool init_ok = false;
+-	for (unsigned i = 0; i < 5000; ++i) {
++	for (unsigned i = 0; i < 100; ++i) {
+ 		init = gpu_rd(gmu, GMU_CM3_FW_INIT_RESULT);
+-		if ((init & mask) == reset || (init & 0x1ffu) == 0x100u) {
++		if ((init & mask) == reset) {
+ 			init_ok = true;
+ 			break;
+ 		}
++		if (smmu && (gpu_rd(smmu, 0x48u) || gpu_rd(smmu, 0x8058u))) {
++			fault = 1;
++			break;
++		}
+ 		delay(1);
+ 	}
+ 	printf("SWEET GPU: gmu boot last=%#x want=%#x/%#x init=%#x %s\n",
+ 	    last, reset, mask, init, init_ok ? "ok" : "timeout");
+-	printf("SWEET GPU: gmu boot intr=%#x gmu2host=%#x hfi=%#x\n",
++	printf("SWEET GPU: gmu boot intr=%#x gmu2host=%#x hfi=%#x fault=%d\n",
+ 	    gpu_rd(gmu, GMU_AO_HOST_INTR_STATUS),
+ 	    gpu_rd(gmu, GMU_GMU2HOST_INTR_INFO),
+-	    gpu_rd(gmu, GMU_HFI_CTRL_STATUS));
++	    gpu_rd(gmu, GMU_HFI_CTRL_STATUS), fault);
++	if (smmu) {
++		printf("SWEET GPU: smmu faults end gfsr=%#x cb0=%#x\n",
++		    gpu_rd(smmu, 0x48u), gpu_rd(smmu, 0x8058u));
++	}
+ 	gpu_wr(gmu, GMU_CM3_SYSRESET, 1);	/* stop the CM3; bounded probe */
+ restore:
+ 	if (!(cx_before & 1u)) {

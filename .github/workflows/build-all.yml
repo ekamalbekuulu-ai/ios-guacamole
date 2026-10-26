@@ -1,0 +1,321 @@
+name: build-all
+
+# 一加 7 Pro（guacamole / SM8150）跑 iOS 16 —— 一条流水线出三个成品：
+#   xnu-kernel        内核 Mach-O（macOS runner 编，绕不过 Apple 的工具链）
+#   shim-boot.img     约 29 MB，刷机用的启动镜像（内核 + 设备树 + 启动参数）
+#   ios16-root.simg   约 11.3 GB iOS 根文件系统（分卷传到 Release，2 GB/卷）
+#
+# 全部在 GitHub 的机器上跑，本机不需要 Linux / macOS / 梯子。
+
+on:
+  workflow_dispatch:
+    inputs:
+      do_kernel:
+        description: '① 编内核（macOS runner，8~15 分钟）'
+        type: boolean
+        default: true
+      do_shim:
+        description: '② 打包 shim-boot.img（需要仓库里放了手机的原厂 DTB）'
+        type: boolean
+        default: true
+      do_root:
+        description: '③ 造 iOS 根镜像（ubuntu runner，30~50 分钟，含 6 GB IPSW 下载）'
+        type: boolean
+        default: true
+      ipsw_url:
+        description: 'IPSW 直链（默认 iPhone X 16.7.16 / 20H392）'
+        type: string
+        default: 'https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw'
+      root_size:
+        description: '根卷大小'
+        type: string
+        default: '16G'
+
+permissions:
+  contents: write   # 上传 Release 成品
+  actions: read
+
+env:
+  MACOS_VERSION: '13.5'
+  KERNEL_CONFIG: DEVELOPMENT
+  MACHINE_CONFIG: GUACAMOLE
+  DXB_REPO: https://github.com/blacktop/darwin-xnu-build
+  DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
+  RELEASE_TAG: guacamole-ios16-20H392
+
+jobs:
+  # ---------------------------------------------------------------- 环境体检
+  envcheck:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 磁盘 / FUSE / 依赖可用性
+        run: |
+          echo "=== 磁盘 ==="; df -h / /mnt 2>/dev/null || df -h
+          echo "=== CPU / 内存 ==="; nproc; free -h
+          echo "=== /dev/fuse ==="; ls -l /dev/fuse || echo "NO /dev/fuse（apfs-fuse 会挂不上）"
+          echo "=== hfsprogs / img2simg / mkbootimg 是否在源里 ==="
+          sudo apt-get update -qq
+          for p in hfsprogs rsync android-sdk-libsparse-utils android-sdk-mkbootimg libfuse3-dev libbz2-dev; do
+            if apt-cache policy "$p" | grep -q 'Candidate: [0-9]'; then echo "  OK   $p"; else echo "  MISS $p"; fi
+          done
+
+  # ---------------------------------------------------------------- ① 内核
+  kernel:
+    if: ${{ inputs.do_kernel }}
+    runs-on: macos-14          # macos-14 自带 Xcode 15.x：iig 与 xnu-8796 的 IORPC ABI 才匹配
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取 blacktop/darwin-xnu-build + 应用补丁
+        run: |
+          git init -q dxb
+          git -C dxb fetch -q --depth 1 "$DXB_REPO" "$DXB_SHA"
+          git -C dxb checkout -q FETCH_HEAD
+          cp xnu/patches/*.patch xnu/patches/*.sh dxb/patches/
+          # libfirehose_kernel 只编 arm64e，SWEET 内核是纯 arm64
+          sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
+          grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
+
+      - name: 依赖
+        run: |
+          brew install jq gum bash cmake ninja
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
+          sudo chmod +x /usr/local/bin/xcodes
+          sw_vers
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: 编内核
+        working-directory: dxb
+        env:
+          MAKEFLAGS: -k
+        run: bash build.sh
+
+      - name: 收集内核
+        if: always()
+        run: |
+          mkdir -p out
+          cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
+          ls -la out
+          (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xnu-kernel
+          path: out/
+          if-no-files-found: warn
+
+      # iPhone X 真机设备树的 /product 节点：ADT 少了它，SpringBoard 画第一个图标就崩
+      - name: 取 iPhone X 的 d22ap.adt（只需 IPSW 里的一个小文件，HTTP Range）
+        continue-on-error: true
+        run: |
+          brew install blacktop/tap/ipsw || true
+          python3 tools/remotezip.py "${{ inputs.ipsw_url }}" DeviceTree.d22ap.im4p research/ipsw-x/dt
+          ipsw img4 im4p extract research/ipsw-x/dt/Firmware/all_flash/DeviceTree.d22ap.im4p \
+            -o research/ipsw-x/d22ap.adt
+          ls -l research/ipsw-x/d22ap.adt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: d22ap-adt
+          path: research/ipsw-x/d22ap.adt
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------- ② shim-boot.img
+  shim:
+    if: ${{ inputs.do_shim }}
+    needs: [kernel]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: xnu-kernel
+          path: xnu/out
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: d22ap-adt
+          path: research/ipsw-x
+
+      - name: 工具链
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            cpio android-sdk-mkbootimg python3
+
+      - name: 找原厂 DTB
+        run: |
+          set -e
+          if [ -f dtb/boot_unpacked/dtb ]; then
+            echo "用它仓库里的 dtb/boot_unpacked/dtb"
+          elif [ -f backup/boot.img ]; then
+            echo "从 backup/boot.img 解包"
+            python3 tools/unpack_bootv2.py backup/boot.img dtb/boot_unpacked
+          elif [ -f backup/boot_b.img ]; then
+            echo "从 backup/boot_b.img 解包"
+            python3 tools/unpack_bootv2.py backup/boot_b.img dtb/boot_unpacked
+          else
+            echo "::error::仓库里没有原厂 DTB。放 dtb/boot_unpacked/dtb 或 backup/boot.img（见说明文档第 2 节）"
+            exit 1
+          fi
+          ls -l dtb/boot_unpacked/dtb
+
+      - name: 设备树 + payload + boot.img
+        run: |
+          set -e
+          ls -l xnu/out || true
+          K=xnu/out/kernel.development.guacamole
+          [ -f "$K" ] || { echo "::error::没有内核产物 $K"; ls -la xnu/out; exit 1; }
+          mkdir -p shim/out
+          python3 tools/mkadt.py shim/out/guacamole.adt --device guacamole --highmem
+          python3 tools/mkpayload.py "$K" shim/out/guacamole.adt shim/out/payload.bin \
+            --cmdline 'debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetusb=0 sweettouchdelay=20 sweetfb_noconsole=1 sweetfb_hz=30'
+          ( cd shim && BOARD=guacamole DTB=../dtb/boot_unpacked/dtb ./build.sh ../shim/out/payload.bin )
+          cp shim/out/shim-boot.img shim-boot.img
+          sha256sum shim-boot.img | tee shim-boot.img.sha256
+          ls -l shim-boot.img
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shim-boot
+          path: |
+            shim-boot.img
+            shim-boot.img.sha256
+
+      - name: 传到 Release（29 MB，方便直接下）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "OnePlus 7 Pro (guacamole) iOS 16.7.16" \
+              --notes "shim-boot.img = 启动镜像（内核+设备树+启动参数）；ios16-root.simg.part-* = iOS 根镜像分卷，按文件名顺序 cat 合并。"
+          gh release upload "$RELEASE_TAG" shim-boot.img shim-boot.img.sha256 --repo "$GITHUB_REPOSITORY" --clobber
+
+  # ---------------------------------------------------------------- ③ iOS 根镜像
+  root:
+    if: ${{ inputs.do_root }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 依赖 + 编 apfs-fuse
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential cmake pkg-config libfuse3-dev libbz2-dev \
+            zlib1g-dev libssl-dev hfsprogs rsync fuse3 android-sdk-libsparse-utils unzip curl
+          if [ ! -x "$(command -v apfs-fuse)" ]; then
+            git clone -q --recursive https://github.com/sgan81/apfs-fuse /tmp/apfs-fuse
+            cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release
+            cmake --build /tmp/apfs-fuse/build -j"$(nproc)"
+            sudo cmake --install /tmp/apfs-fuse/build
+          fi
+          apfs-fuse --help 2>&1 | head -3 || true
+          mkfs.hfsplus -V 2>&1 | head -2 || true
+          img2simg 2>&1 | head -2 || true
+
+      - name: 选工作盘（/mnt 比 / 宽裕得多）
+        run: |
+          FREE=$(df -P -k /mnt 2>/dev/null | awk 'NR==2{print $4}')
+          if [ -w /mnt ] && [ -n "$FREE" ] && [ "$FREE" -gt 40000000 ]; then WORK=/mnt/work; else WORK="$RUNNER_TEMP/work"; fi
+          mkdir -p "$WORK"
+          echo "WORK=$WORK" >> "$GITHUB_ENV"
+          df -h "$WORK"
+
+      - name: 下载 iPhone X 16.7.16 IPSW（6 GB，Apple 官方 CDN）
+        run: |
+          set -e
+          cd "$WORK"
+          curl -L --fail --retry 5 --retry-delay 10 -C - -o ipsw.zip "${{ inputs.ipsw_url }}"
+          ls -l ipsw.zip
+          df -h .
+
+      - name: 解出三个 dmg
+        run: |
+          set -e
+          cd "$WORK"
+          unzip -o -q ipsw.zip '*.dmg' || unzip -o -q ipsw.zip
+          rm -f ipsw.zip
+          ls -lS *.dmg | head -10
+          # 20H392 的固定名字；找不到就按大小兜底
+          pick() { [ -f "$1" ] && echo "$1" || true; }
+          OS=$(pick 087-86698-044.dmg)
+          SYS=$(pick 087-86593-047.dmg)
+          APP=$(pick 087-86715-047.dmg)
+          if [ -z "$OS" ] || [ -z "$SYS" ]; then
+            echo "固定文件名没命中，按大小挑"
+            OS=$(ls -S *.dmg | head -1)
+            SYS=$(ls -S *.dmg | sed -n 2p)
+            APP=$(ls -S *.dmg | grep -v -e "$OS" -e "$SYS" | tail -1)
+          fi
+          echo "OS=$OS  SystemOS=$SYS  AppOS=$APP"
+          [ -n "$OS" ] && [ -n "$SYS" ] && [ -n "$APP" ] || { echo "::error::没凑齐三个 dmg"; exit 1; }
+          echo "OS=$OS" >> "$GITHUB_ENV"; echo "SYS=$SYS" >> "$GITHUB_ENV"; echo "APP=$APP" >> "$GITHUB_ENV"
+
+      - name: 造 HFS+ 根卷（10~25 分钟）
+        run: |
+          set -e
+          cd "$WORK"
+          sudo bash "$GITHUB_WORKSPACE/tools/mkiosroot.sh" "$OS" "$SYS" "$APP" ios16-root.img "${{ inputs.root_size }}"
+          sudo fsck.hfsplus -fy ios16-root.img || true
+          df -h .
+
+      - name: bring-up 改动（跳过设置向导 / 激活状态 / 关看门狗）
+        run: |
+          set -e
+          cd "$WORK"
+          sudo mkdir -p /mnt/iosroot
+          sudo mount -t hfsplus -o loop,force ios16-root.img /mnt/iosroot
+          sudo python3 "$GITHUB_WORKSPACE/tools/sweet-root-tweaks.py" /mnt/iosroot
+          sudo umount /mnt/iosroot
+          rm -f "$OS" "$SYS" "$APP"
+          df -h .
+
+      - name: 转 Android 稀疏镜像 + 分卷
+        run: |
+          set -e
+          cd "$WORK"
+          img2simg ios16-root.img ios16-root.simg 4096
+          ls -l ios16-root.simg
+          sha256sum ios16-root.simg | tee ios16-root.simg.sha256
+          rm -f ios16-root.img
+          mkdir -p parts
+          split -b 1900M -d -a 2 ios16-root.simg parts/ios16-root.simg.part-
+          ls -l parts/ | head
+          du -sh parts
+          df -h .
+          ( cd parts && sha256sum * > SHA256SUMS )
+          cat parts/SHA256SUMS
+
+      - name: 分卷传到 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          cd "$WORK/parts"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "OnePlus 7 Pro (guacamole) iOS 16.7.16" \
+              --notes "shim-boot.img = 启动镜像；ios16-root.simg.part-NN = 根镜像分卷，按名字顺序 cat 合并后 fastboot flash userdata。"
+          for f in ios16-root.simg.part-* SHA256SUMS; do
+            echo "upload $f"
+            gh release upload "$RELEASE_TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios16-root-sha256
+          path: ${{ env.WORK }}/ios16-root.simg.sha256
+          if-no-files-found: warn

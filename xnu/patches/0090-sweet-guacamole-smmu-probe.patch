@@ -1,0 +1,98 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index fe5e6ca..7db84d0 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -12,6 +12,7 @@
+  *                sequence, then vote it off after the probe
+  *   sweetgpu=5   additionally enable the GMU CX/GX clocks and read the GMU
+  *                firmware/reset/HFI registers (read-only)
++ *   sweetgpu=6   additionally read the GPU SMMU ID/global/SID/context state
+  *
+  * The ABL leaves gcc_gpu_cfg_ahb_clk gated. Reading the GPUCC register block
+  * in that state wedges the interconnect: the shim probe did exactly that and
+@@ -97,6 +98,18 @@ void sweet_gpu_init(void);
+ #define GMU_AO_HOST_INTR_STATUS	(0x9305u * 4u)
+ #define GMU_AHB_FENCE_STATUS	(0x9313u * 4u)
+ 
++/* GPU SMMU (SMMU-500), GR0 global and stream-match registers. */
++#define GPU_SMMU_PA		0x02ca0000u
++#define GPU_SMMU_SIZE		0x00010000u
++#define SMMU_GR0_sCR0		0x0u
++#define SMMU_GR0_sACR		0x10u
++#define SMMU_GR0_ID0		0x20u
++#define SMMU_GR0_ID1		0x24u
++#define SMMU_GR0_ID2		0x28u
++#define SMMU_GR0_sGFSR		0x48u
++#define SMMU_GR0_SMR(n)		(0x800u + (n) * 4u)
++#define SMMU_GR0_S2CR(n)	(0xc00u + (n) * 4u)
++
+ static uint32_t
+ gpu_rd(vm_offset_t base, uint32_t off)
+ {
+@@ -236,6 +249,56 @@ gpu_probe_gmu(vm_offset_t gpucc)
+ 	    gpu_rd(gpucc, GPUCC_CX_GMU_CLK), gpu_rd(gpucc, GPUCC_GX_GMU_CLK));
+ }
+ 
++/*
++ * Read-only GPU SMMU state. GMU firmware blocks live at low IOVAs (icache
++ * 0x4000, dcache 0x44000, HFI 0x60001000), so whether the SMMU is active and
++ * how SIDs 0/2/4/5 are mapped decides the GMU memory plan. No writes here.
++ */
++static void
++gpu_probe_smmu(void)
++{
++	vm_offset_t s = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
++	if (s == 0) {
++		printf("SWEET GPU: SMMU mapping failed\n");
++		return;
++	}
++	uint32_t id0 = gpu_rd(s, SMMU_GR0_ID0);
++	uint32_t id1 = gpu_rd(s, SMMU_GR0_ID1);
++	uint32_t id2 = gpu_rd(s, SMMU_GR0_ID2);
++	uint32_t scr0 = gpu_rd(s, SMMU_GR0_sCR0);
++	uint32_t acr = gpu_rd(s, SMMU_GR0_sACR);
++	uint32_t gfsr = gpu_rd(s, SMMU_GR0_sGFSR);
++	unsigned pgshift = (id1 & 0x80000000u) ? 16 : 12;
++	unsigned npage = 1u << (((id1 >> 28) & 7u) + 1);
++	unsigned ncb = id1 & 0xffu;
++	unsigned nsmr = id0 & 0xffu;
++
++	printf("SWEET GPU: smmu id0=%#x id1=%#x id2=%#x scr0=%#x acr=%#x gfsr=%#x\n",
++	    id0, id1, id2, scr0, acr, gfsr);
++	printf("SWEET GPU: smmu pgshift=%u gr-page=%u cb=%u smr=%u clientpd=%u\n",
++	    pgshift, npage, ncb, nsmr, scr0 & 1u);
++	for (unsigned n = 0; n < 8; ++n) {
++		printf("SWEET GPU: smmu sid%u smr=%#x s2cr=%#x\n", n,
++		    gpu_rd(s, SMMU_GR0_SMR(n)), gpu_rd(s, SMMU_GR0_S2CR(n)));
++	}
++	if (!(scr0 & 1u)) {
++		uint32_t gr1 = npage << pgshift;
++		for (unsigned n = 0; n < 8; ++n) {
++			uint32_t s2cr = gpu_rd(s, SMMU_GR0_S2CR(n));
++			unsigned type = (s2cr >> 16) & 3u;
++			unsigned cb = s2cr & 0xffu;
++			uint32_t base = gr1 + (cb << pgshift);
++			if (type != 0 || cb >= ncb ||
++			    base > GPU_SMMU_SIZE - 0x40u) {
++				continue;
++			}
++			printf("SWEET GPU: smmu sid%u cb%u sctlr=%#x ttbr0=%#x tcr=%#x\n",
++			    n, cb, gpu_rd(s, base + 0x0), gpu_rd(s, base + 0x20),
++			    gpu_rd(s, base + 0x30));
++		}
++	}
++}
++
+ /*
+  * Power the GX head switch for a bounded register probe. This is the vendor
+  * gdsc-regulator enable sequence (SW reset, AON reset, deassert clamp, clear
+@@ -377,6 +440,9 @@ sweet_gpu_init(void)
+ 						if (stage >= 5) {
+ 							gpu_probe_gmu(gpucc);
+ 						}
++						if (stage >= 6) {
++							gpu_probe_smmu();
++						}
+ 						gpu_power_down_gx(gpucc);
+ 						probed = true;
+ 						break;

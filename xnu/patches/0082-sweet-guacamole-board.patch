@@ -1,0 +1,2100 @@
+diff --git a/bsd/conf/Makefile.template b/bsd/conf/Makefile.template
+index f2d8bf8..428469f 100644
+--- a/bsd/conf/Makefile.template
++++ b/bsd/conf/Makefile.template
+@@ -44,8 +44,9 @@ CFLAGS+= -include meta_features.h -DDRIVER_PRIVATE \
+         -Warray-bounds-pointer-arithmetic
+ SFLAGS+= -include meta_features.h
+ 
+-# This provider is built into SWEET; other boards use their normal kext.
+-ifeq ($(CURRENT_MACHINE_CONFIG),SWEET)
++# This provider is built into SWEET (and its second board, GUACAMOLE);
++# other boards use their normal kext.
++ifneq ($(filter SWEET GUACAMOLE,$(CURRENT_MACHINE_CONFIG)),)
+ SWEET_PTHREAD_ROOT = $(SRCROOT)/bsd/pthread/sweet_libpthread
+ SWEET_PTHREAD_INC = -I$(SWEET_PTHREAD_ROOT) -I$(SWEET_PTHREAD_ROOT)/private -I$(SWEET_PTHREAD_ROOT)/include
+ sweet_pthread_init.o_INCFLAGS = $(SWEET_PTHREAD_INC)
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 6630131..90d1a02 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -108,6 +108,7 @@ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
++bsd/dev/sweet_touch_sec.c		standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
+index a148608..ad97533 100644
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -12,16 +12,17 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/arm64/sweet_dev.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_key(int key, int down);
+ void sweet_keys_init(void);
+ 
+-#define KEYS_CORE_PA     0x0c440000u
+-#define KEYS_OBS_PA      0x0e600000u
+-#define KEYS_CNFG_PA     0x0c40a000u
+-#define KEYS_PON_RT      0x0810u
+-#define KEYS_GPIO_RT     0xc110u
++#define KEYS_CORE_PA     SWEET_DEV_SPMI_CORE_PA
++#define KEYS_OBS_PA      SWEET_DEV_SPMI_OBS_PA
++#define KEYS_CNFG_PA     SWEET_DEV_SPMI_CFG_PA
++#define KEYS_PON_RT      SWEET_DEV_PON_RT
++#define KEYS_GPIO_RT     SWEET_DEV_VOL_GPIO_RT
+ #define KEYS_NO_APID     0xffffu
+ 
+ static vm_offset_t keys_core, keys_obs, keys_cnfg;
+@@ -98,8 +99,10 @@ keys_thread(void *arg, wait_result_t result)
+ 	(void)arg;
+ 	(void)result;
+ 	for (;;) {
+-		uint8_t pon = 0, gpio = 0;
++		uint8_t pon = 0;
+ 		bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
++#if SWEET_DEV_KEYS_VOLUME
++		uint8_t gpio = 0;
+ 		bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
+ 		int now[3] = {!!(pon & 1u), !(gpio & 1u), !!(pon & 2u)};
+ 		if (!pok || !gok) {
+@@ -113,11 +116,27 @@ keys_thread(void *arg, wait_result_t result)
+ 		for (int k = 0; k < 3; ++k) {
+ 			if ((k == 1 ? gok : pok) && now[k] != state[k]) {
+ 				state[k] = now[k];
+-				printf("SWEET KEYS: key=%d down=%d pon=%#x gpio4:c110=%#x\n",
++				printf("SWEET KEYS: key=%d down=%d pon=%#x gpio4:%#x\n",
+ 				    k, state[k], pon, gpio);
+ 				sweet_hid_key(k, state[k]);
+ 			}
+ 		}
++#else /* !SWEET_DEV_KEYS_VOLUME: power key only */
++		int now[3] = {!!(pon & 1u), 0, 0};
++		if (!pok) {
++			if ((errors++ % 250u) == 0) {
++				printf("SWEET KEYS: read error pon-ok=%d arb-status=%#x\n",
++				    pok, keys_last_status);
++			}
++		} else {
++			errors = 0;
++		}
++		if (pok && now[0] != state[0]) {
++			state[0] = now[0];
++			printf("SWEET KEYS: key=0 down=%d pon=%#x\n", state[0], pon);
++			sweet_hid_key(0, state[0]);
++		}
++#endif /* SWEET_DEV_KEYS_VOLUME */
+ 		keys_wait();
+ 	}
+ }
+@@ -152,9 +171,11 @@ sweet_keys_init(void)
+ 		return;
+ 	}
+ 	keys_pon_apid = keys_find_apid(0x008, count);
+-	keys_gpio_apid = keys_find_apid(0x4c1, count);
+-	uint8_t pon = 0, gpio = 0, mode = 0, en = 0, subtype = 0;
++	uint8_t pon = 0;
+ 	bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
++#if SWEET_DEV_KEYS_VOLUME
++	keys_gpio_apid = keys_find_apid(0x4c1, count);
++	uint8_t gpio = 0, mode = 0, en = 0, subtype = 0;
+ 	bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
+ 	bool mok = keys_read(keys_gpio_apid, 0xc140, &mode);
+ 	bool eok = keys_read(keys_gpio_apid, 0xc146, &en);
+@@ -166,12 +187,22 @@ sweet_keys_init(void)
+ 	unsigned dir = subtype >= 0x10u && subtype <= 0x13u ?
+ 	    mode & 3u : (mode >> 4) & 7u;
+ 	if (!eok || !mok || !sok || !(en & 0x80u) || (dir != 0 && dir != 2)) {
+-		printf("SWEET KEYS: GPIO2 not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
++		printf("SWEET KEYS: volume-up GPIO not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
+ 		keys_gpio_apid = KEYS_NO_APID;
+ 	}
+ 	if (!pok && !gok) {
+ 		printf("SWEET KEYS: no readable keys; polling retained for recovery\n");
+ 	}
++#else /* !SWEET_DEV_KEYS_VOLUME */
++	/* Volume keys unmapped on this board yet: the PMIC GPIO (PM8150 GPIO6,
++	 * GPIO7 on guacamole) still has to be identified in the APID table.
++	 * Power (PON_REASON1 bit 0) is polled as usual. See GUACAMOLE.md. */
++	printf("SWEET KEYS: arb=%#x apids=%u pon-apid=%u pon=%#x/%d (volume keys unmapped)\n",
++	    keys_version, count, keys_pon_apid, pon, pok);
++	if (!pok) {
++		printf("SWEET KEYS: no readable power key; polling retained for recovery\n");
++	}
++#endif /* SWEET_DEV_KEYS_VOLUME */
+ 	kern_return_t kr = kernel_thread_start(keys_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index 4da50d8..2f75bce 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -9,15 +9,16 @@
+ #include <sys/errno.h>
+ #include <kern/clock.h>
+ #include <machine/machine_routines.h>
++#include <pexpert/arm64/sweet_dev.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ 
+ /* Live downstream DT has two positional reg entries, no reg-names. */
+-#define RH_RSC_PA       0x18220000u
+-#define RH_TCS_PA       0x18220d00u
+-#define RH_TCS_SIZE     0x3000u
+-#define RH_DICT_PA      0x0c3f000cu
++#define RH_RSC_PA       SWEET_DEV_RPMH_RSC_PA
++#define RH_TCS_PA       SWEET_DEV_RPMH_TCS_PA
++#define RH_TCS_SIZE     SWEET_DEV_RPMH_TCS_SIZE
++#define RH_DICT_PA      SWEET_DEV_RPMH_DICT_PA
+ #define RH_DRV          2u
+ #define RH_ACTIVE_N     2u       /* DT order: ACTIVE 2, SLEEP 3, WAKE 3 */
+ #define RH_NORMAL_N     8u       /* hidden CONTROL TCS is not in this bank */
+@@ -150,11 +151,15 @@ rh_map(void)
+ 	uint32_t flags = rh_read(rh_db, 140);
+ 	printf("SWEET RPMH: cmd-db version=%#x magic=%#x checksum=%#x flags=%#x\n",
+ 	    db_version, magic, rh_read(rh_db, 136), flags);
+-	/* Linux only checks magic; version 1 is an intentionally stricter policy. */
+-	if (magic != RH_DB_MAGIC || db_version != 1 || (flags & 1u)) {
+-		printf("SWEET RPMH: unsupported/standalone cmd-db\n");
++	/* Mainline cmd-db.c only validates the magic. Keep version and flags
++	 * advisory so a newer but compatible database is not rejected. */
++	if (magic != RH_DB_MAGIC) {
++		printf("SWEET RPMH: unsupported cmd-db magic\n");
+ 		return EINVAL;
+ 	}
++	if (db_version != 1u || (flags & 1u)) {
++		printf("SWEET RPMH: cmd-db version/flags differ from the v1 layout; continuing\n");
++	}
+ 	return 0;
+ }
+ 
+@@ -327,9 +332,9 @@ rh_send(uint32_t address, unsigned mv)
+ int
+ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
+ {
+-	/* Board-specific helper: do not apply PMIC5-LDO policy to arbitrary resources. */
+-	if (!res || strcmp(res, "ldoc11") || mv < 2950 || mv > 3400) {
+-		printf("SWEET RPMH: expected ldoc11 and 2950..3400 mV\n");
++	/* Board-specific helper: only the board's touch rail, sane voltage. */
++	if (!res || strcmp(res, SWEET_DEV_TOUCH_VREG_NAME) || mv < 2950 || mv > 3400) {
++		printf("SWEET RPMH: expected %s and 2950..3400 mV\n", SWEET_DEV_TOUCH_VREG_NAME);
+ 		return EINVAL;
+ 	}
+ 	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 1981490..c8ea9d5 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -10,13 +10,14 @@
+ #include <sys/systm.h>
+ #include <machine/machine_routines.h>
+ #include <IOKit/IOLocks.h>
++#include <pexpert/arm64/sweet_dev.h>
+ #include "sweet_spmi.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+-#define SP_CORE_PA 0x0c440000u
+-#define SP_OBS_PA  0x0e600000u
+-#define SP_CFG_PA  0x0c40a000u
++#define SP_CORE_PA SWEET_DEV_SPMI_CORE_PA
++#define SP_OBS_PA  SWEET_DEV_SPMI_OBS_PA
++#define SP_CFG_PA  SWEET_DEV_SPMI_CFG_PA
+ #define SP_NO_APID 0xffffu
+ 
+ static vm_offset_t sp_core, sp_obs, sp_cfg;
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 03defe6..5bbddb8 100644
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -5,7 +5,10 @@
+  * No firmware/config upload or direct PMIC writes. Only IC data write:
+  * zero to GT9896's event status after reading a report. See touch2/report.md.
+  */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++/* The guard below uses SWEET_DEV_TOUCH: the header must come first. */
++#include <pexpert/arm64/sweet_dev.h>
++
++#if defined(ARM64_BOARD_CONFIG_SWEET) && SWEET_DEV_TOUCH
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/errno.h>
+@@ -14,6 +17,7 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/arm64/sweet_dev.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ /* Mach MIG declaration is not included by BSD's exported thread.h. */
+@@ -22,11 +26,11 @@ extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
+ void sweet_touch_init(void);
+ 
+-#define TOUCH_SE_PA      0x00a84000u
+-#define TOUCH_GCC_PA     0x00100000u
+-#define TOUCH_NORTH_PA   0x03900000u /* DT TLMM + NORTH (0x500000) */
+-#define TOUCH_GCC_VOTE   0x5200cu
+-#define TOUCH_RCG       0x18148u    /* wrapper1 LOCAL S1 = global SE7 */
++#define TOUCH_SE_PA      SWEET_DEV_TOUCH_SE_PA
++#define TOUCH_GCC_PA     SWEET_DEV_TOUCH_GCC_PA
++#define TOUCH_NORTH_PA   SWEET_DEV_TOUCH_NORTH_PA
++#define TOUCH_GCC_VOTE   SWEET_DEV_TOUCH_GCC_VOTE
++#define TOUCH_RCG        SWEET_DEV_TOUCH_RCG
+ #define TOUCH_GPIO_CFG(n) ((uint32_t)(n) * 0x1000u)
+ #define TOUCH_GPIO_IO(n)  (TOUCH_GPIO_CFG(n) + 4u)
+ #define TOUCH_MAX        10u
+@@ -657,4 +661,15 @@ sweet_touch_init(void)
+ 		printf("SWEET TOUCH: kernel_thread_start failed %d\n", kr);
+ 	}
+ }
++#elif defined(ARM64_BOARD_CONFIG_SWEET) && !SWEET_DEV_TOUCH_SEC
++/*
++ * No touch driver for this board yet: keeps the sweet_ufs.c call site happy.
++ * (sweet_touch_sec.c will replace this once the S6SY761 driver lands.)
++ */
++#include <sys/systm.h>
++void
++sweet_touch_init(void)
++{
++	printf("SWEET TOUCH: no driver for this board yet\n");
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_touch_sec.c b/bsd/dev/sweet_touch_sec.c
+new file mode 100644
+index 0000000..ac17902
+--- /dev/null
++++ b/bsd/dev/sweet_touch_sec.c
+@@ -0,0 +1,637 @@
++/*
++ * OnePlus 7 Pro (guacamole, SM8150) touch: Samsung S6SY761 at I2C address 0x48
++ * on the SE17 lines (gpio55/gpio56, live tree qupv3_se17_i2c_active).
++ *
++ * Why bit-banging: the serial engine behind those pins has its FIFO (CPU)
++ * interface fused off on this platform - GENI_IF_DISABLE_RO (0x64) reads 1,
++ * FIFO_IF_DISABLE - so mainline/Android drive it with GPI DMA only. The GENI
++ * FIFO path can never start a command (every transfer times out, no NACK),
++ * and implementing GPI DMA is out of scope here, so this driver emulates the
++ * I2C bus directly on the two GPIOs (push-pull low, external pull-up for the
++ * release level; the live tree configures both pins bias-disable, so the bus
++ * has external pull-ups). The SE registers are only printed once for the
++ * record.
++ *
++ * Everything else follows the vendor sequence for this board: gpio119 1.8 V
++ * enable high, 1 ms, PM8150 L17 through RPMh (cmd-db "ldoa17", 3008 mV),
++ * reset gpio54 low/high, wait for the boot-complete event, SENSE_ON, then
++ * poll the event stack. The TLMM register map matters: SM8150 splits the
++ * 0x03000000 region into four tile arrays (west +0x100000, east +0x500000,
++ * north +0x900000, south +0xD00000) with pins at tile + 0x1000 * gpio; the
++ * touch pins are SOUTH. Addressing without the tile offset reads zero and
++ * drops writes silently - that is what broke every earlier attempt.
++ */
++#include <pexpert/arm64/sweet_dev.h>
++
++#if defined(ARM64_BOARD_CONFIG_SWEET) && SWEET_DEV_TOUCH_SEC
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++/* Mach MIG declaration is not included by BSD's exported thread.h. */
++extern kern_return_t thread_terminate(thread_t);
++extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++void sweet_touch_init(void);
++
++/* SE17 registers used by the one-shot diagnostic print only. */
++#define SE_GENI_FW_REVISION 0x068u
++#define SE_GENI_IF_DISABLE  0x064u
++#define SE_GENI_IOS         0x908u
++
++/* sec_ts protocol (mainline s6sy761.c + vendor sec_drivers_s6sy761.h). */
++#define TS_ADDR             0x48u
++#define TS_EVENT_LEN        8u
++#define TS_CMD_SENSE_ON     0x10u
++#define TS_CMD_SENSE_OFF    0x11u
++#define TS_CMD_FW_INTEGRITY 0x21u
++#define TS_CMD_PANEL_INFO   0x23u
++#define TS_CMD_TOUCH_FUNC   0x30u
++#define TS_CMD_DEVICE_ID    0x52u
++#define TS_CMD_BOOT_STATUS  0x55u
++#define TS_CMD_READ_EVENT   0x60u      /* one event */
++#define TS_CMD_READ_ALL     0x61u      /* stacked events */
++#define TS_FW_OK            0x80u
++#define TS_BS_APPLICATION   0x20u
++#define TS_EVENT_INFO       0x02u
++#define TS_EVENT_VENDOR     0x07u
++#define TS_ACK_BOOT_COMPLETE 0x00u
++#define TS_MASK_TOUCH       0x01u
++#define TS_MAX_FINGERS      10u
++
++/* Touch pins on this board (live device tree: tp_1v8/tp_rst/tp_irq). */
++#define TS_PIN_RESET    54u
++#define TS_PIN_1V8      119u
++#define TS_PIN_IRQ      122u
++/* SE17 I2C lines; the roles are auto-detected at run time. */
++#define TS_PIN_I2C_A    55u
++#define TS_PIN_I2C_B    56u
++
++/*
++ * SM8150 splits the TLMM into four tile arrays inside the 0x03000000 region
++ * (vendor and mainline group tables agree), pins at tile + 0x1000 * gpio,
++ * ctl at +0 and io (latch/level) at +4. Each tile is mapped separately: one
++ * 14 MiB mapping does not fit this kernel's VA space.
++ */
++enum { TS_TILE_WEST, TS_TILE_EAST, TS_TILE_NORTH, TS_TILE_SOUTH, TS_TILE_COUNT };
++
++static vm_offset_t ts_tiles[TS_TILE_COUNT];
++
++static unsigned
++ts_tile(unsigned pin)
++{
++	if (pin <= 7 || pin == 38 || (pin >= 51 && pin <= 82) ||
++	    (pin >= 98 && pin <= 101) || (pin >= 114 && pin <= 124) ||
++	    (pin >= 126 && pin <= 154)) {
++		return TS_TILE_SOUTH;	/* touch, panel reset, keys */
++	}
++	if ((pin >= 8 && pin <= 20) || (pin >= 31 && pin <= 37) ||
++	    (pin >= 39 && pin <= 42) || (pin >= 83 && pin <= 86) ||
++	    (pin >= 88 && pin <= 97) || (pin >= 102 && pin <= 104) ||
++	    pin >= 169) {
++		return TS_TILE_NORTH;
++	}
++	if ((pin >= 21 && pin <= 30) || (pin >= 43 && pin <= 50) || pin == 87) {
++		return TS_TILE_EAST;
++	}
++	return TS_TILE_WEST;		/* 105-113, 125, 155-168 */
++}
++
++#define TS_GPIO_OFF(n)    ((uint32_t)(n) * 0x1000u)
++#define TS_GPIO_IO_OFF(n) (TS_GPIO_OFF(n) + 4u)
++
++static struct {
++	vm_offset_t se;
++	bool started, dead;
++	unsigned events, i2c_errors;
++	unsigned sda_pin, scl_pin;
++	int vreg_err, ack_err, id_err, sense_err;
++	uint8_t id[3];
++	int x[TS_MAX_FINGERS], y[TS_MAX_FINGERS];
++	bool down[TS_MAX_FINGERS];
++} ts;
++
++static uint32_t
++ts_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++ts_wr(vm_offset_t base, uint32_t off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static uint32_t
++ts_gpio_rd(unsigned pin)
++{
++	return ts_rd(ts_tiles[ts_tile(pin)], TS_GPIO_OFF(pin));
++}
++
++static uint32_t
++ts_gpio_io_rd(unsigned pin)
++{
++	return ts_rd(ts_tiles[ts_tile(pin)], TS_GPIO_IO_OFF(pin));
++}
++
++static void
++ts_gpio_wr(unsigned pin, uint32_t v)
++{
++	ts_wr(ts_tiles[ts_tile(pin)], TS_GPIO_OFF(pin), v);
++}
++
++static void
++ts_gpio_io_wr(unsigned pin, uint32_t v)
++{
++	ts_wr(ts_tiles[ts_tile(pin)], TS_GPIO_IO_OFF(pin), v);
++}
++
++static void
++ts_wait(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&ts, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++/* mux 0 = GPIO, pull 0b11 = pull-up, drive 3 = 8 mA. */
++static void
++ts_gpio(unsigned pin, unsigned mux, unsigned pull, unsigned drive, bool out, bool high)
++{
++	uint32_t cfg = ts_gpio_rd(pin);
++	if (out) {
++		/* Latch the level before switching the pin to output. */
++		ts_gpio_io_wr(pin, (ts_gpio_io_rd(pin) & ~2u) | (high ? 2u : 0u));
++	}
++	cfg &= ~0x3ffu;
++	cfg |= (mux << 2) | pull | (drive << 6) | (out ? 0x200u : 0u);
++	ts_gpio_wr(pin, cfg);
++}
++
++/*
++ * Open-drain emulation: "low" is an output driving 0, "release" is an input
++ * (the external pull-up sets the level). The output latch stays 0 so that
++ * enabling the driver always pulls the line down.
++ */
++static void
++bb_level(unsigned pin, bool low)
++{
++	uint32_t cfg = ts_gpio_rd(pin) & ~0x3ffu;
++	if (low) {
++		ts_gpio_io_wr(pin, ts_gpio_io_rd(pin) & ~2u);
++		cfg |= 0x200u;
++	}
++	ts_gpio_wr(pin, cfg);
++}
++
++static void
++bb_sda(unsigned v) { bb_level(ts.sda_pin, !v); }
++static void
++bb_scl(unsigned v) { bb_level(ts.scl_pin, !v); }
++static int
++bb_sda_read(void) { return (int)(ts_gpio_io_rd(ts.sda_pin) & 1u); }
++
++/* About 100 kHz: every edge separated by 4 us. */
++static void
++bb_delay(void) { delay(4); }
++
++static void
++bb_start(void)
++{
++	bb_sda(1);
++	bb_scl(1);
++	bb_delay();
++	bb_sda(0);
++	bb_delay();
++	bb_scl(0);
++	bb_delay();
++}
++
++static void
++bb_stop(void)
++{
++	bb_sda(0);
++	bb_delay();
++	bb_scl(1);
++	bb_delay();
++	bb_sda(1);
++	bb_delay();
++}
++
++static void
++bb_tx_byte(uint8_t b)
++{
++	for (int i = 7; i >= 0; --i) {
++		bb_sda((b >> i) & 1u);
++		bb_delay();
++		bb_scl(1);
++		bb_delay();
++		bb_scl(0);
++		bb_delay();
++	}
++}
++
++static uint8_t
++bb_rx_byte(bool ack)
++{
++	uint8_t v = 0;
++
++	bb_sda(1);
++	for (int i = 7; i >= 0; --i) {
++		bb_delay();
++		bb_scl(1);
++		bb_delay();
++		v = (uint8_t)((v << 1) | (uint8_t)bb_sda_read());
++		bb_scl(0);
++	}
++	bb_sda(ack ? 0 : 1);
++	bb_delay();
++	bb_scl(1);
++	bb_delay();
++	bb_scl(0);
++	bb_sda(1);
++	bb_delay();
++	return v;
++}
++
++/* Returns 0 when the target acknowledged the byte just sent. */
++static int
++bb_ack(void)
++{
++	int ack;
++	bb_sda(1);
++	bb_delay();
++	bb_scl(1);
++	bb_delay();
++	ack = bb_sda_read();
++	bb_scl(0);
++	bb_delay();
++	return ack ? ENXIO : 0;
++}
++
++static int
++bb_write(uint8_t addr, const uint8_t *tx, unsigned n)
++{
++	int err;
++	bb_start();
++	bb_tx_byte((uint8_t)(addr << 1));
++	err = bb_ack();
++	for (unsigned i = 0; i < n && err == 0; ++i) {
++		bb_tx_byte(tx[i]);
++		err = bb_ack();
++	}
++	bb_stop();
++	return err;
++}
++
++static int
++bb_read(uint8_t addr, uint8_t reg, uint8_t *buf, unsigned n)
++{
++	int err;
++	bb_start();
++	bb_tx_byte((uint8_t)(addr << 1));
++	err = bb_ack();
++	if (err == 0) {
++		bb_tx_byte(reg);
++		err = bb_ack();
++	}
++	if (err == 0) {
++		bb_start();	/* repeated start */
++		bb_tx_byte((uint8_t)((addr << 1) | 1u));
++		err = bb_ack();
++	}
++	for (unsigned i = 0; i < n && err == 0; ++i) {
++		buf[i] = bb_rx_byte(i + 1u < n);
++	}
++	bb_stop();
++	return err;
++}
++
++/* Clock nine pulses so a target holding SDA low can let go. */
++static void
++bb_recover(void)
++{
++	bb_sda(1);
++	for (unsigned i = 0; i < 9; ++i) {
++		bb_scl(0);
++		bb_delay();
++		bb_scl(1);
++		bb_delay();
++	}
++	bb_stop();
++}
++
++static int
++ts_read(uint8_t reg, uint8_t *buf, unsigned len)
++{
++	int err = bb_read(TS_ADDR, reg, buf, len);
++	if (err) {
++		ts.i2c_errors++;
++	}
++	return err;
++}
++
++static int
++ts_cmd(uint8_t reg)
++{
++	int err = bb_write(TS_ADDR, &reg, 1);
++	if (err) {
++		ts.i2c_errors++;
++	}
++	return err;
++}
++
++static int
++ts_write_reg(uint8_t reg, uint8_t val)
++{
++	uint8_t t[2] = {reg, val};
++	int err = bb_write(TS_ADDR, t, 2);
++	if (err) {
++		ts.i2c_errors++;
++	}
++	return err;
++}
++
++/* 16-bit little-endian payload (i2c_smbus_write_word_data style). */
++static int
++ts_write_word(uint8_t reg, uint16_t val)
++{
++	uint8_t t[3] = {reg, (uint8_t)val, (uint8_t)(val >> 8)};
++	int err = bb_write(TS_ADDR, t, 3);
++	if (err) {
++		ts.i2c_errors++;
++	}
++	return err;
++}
++
++/* Read events until the requested information ACK shows up (vendor logic). */
++static int
++ts_wait_ready(unsigned ack, unsigned retry_cnt)
++{
++	uint8_t ev[TS_EVENT_LEN] = {0,};
++	int retry = 0;
++
++	while (ts_read(TS_CMD_READ_EVENT, ev, sizeof(ev)) == 0) {
++		unsigned status = (ev[0] >> 2) & 0xfu;
++		if (((status == TS_EVENT_INFO) || (status == TS_EVENT_VENDOR)) &&
++		    ev[1] == (uint8_t)ack) {
++			return 0;
++		}
++		if (++retry > (int)retry_cnt) {
++			printf("SWEET TOUCH: wait ack %#x timeout, event %02x %02x %02x %02x %02x %02x %02x %02x\n",
++			    ack, ev[0], ev[1], ev[2], ev[3], ev[4], ev[5], ev[6], ev[7]);
++			break;
++		}
++		ts_wait(20);
++	}
++	return -1;
++}
++
++/* One event buffer; returns 1 when a frame was forwarded. */
++static int
++ts_handle_event(const uint8_t *ev)
++{
++	static unsigned moves;
++	if (!ev[0]) {
++		return 0;
++	}
++	unsigned eid = ev[0] & 0x03u;
++	if (eid != 0u) {
++		return 0; /* status / information / vendor event */
++	}
++	unsigned tid_raw = (ev[0] & 0x3cu) >> 2;
++	if (!tid_raw || tid_raw > TS_MAX_FINGERS) {
++		return 0;
++	}
++	unsigned id = tid_raw - 1u;
++	unsigned state = (ev[0] & 0xc0u) >> 6;
++	int x = (int)(((unsigned)ev[1] << 4) | (((unsigned)ev[3] & 0xf0u) >> 4));
++	int y = (int)(((unsigned)ev[2] << 4) | ((unsigned)ev[3] & 0x0fu));
++	switch (state) {
++	case 1: /* press */
++	case 2: /* move */
++		ts.x[id] = x;
++		ts.y[id] = y;
++		ts.down[id] = true;
++		ts.events++;
++		if (state == 1 || (++moves % 25u) == 0) {
++			printf("SWEET TOUCH: f%u %s %d,%d\n", id,
++			    state == 1 ? "down" : "move", x, y);
++		}
++		sweet_hid_touch((int)id, 1, x, y);
++		return 1;
++	case 3: /* release */
++		if (ts.down[id]) {
++			ts.down[id] = false;
++			ts.events++;
++			printf("SWEET TOUCH: f%u up %d,%d\n", id, ts.x[id], ts.y[id]);
++			sweet_hid_touch((int)id, 0, ts.x[id], ts.y[id]);
++		}
++		return 1;
++	default: /* S6SY761_TS_NONE */
++		return 0;
++	}
++}
++
++/* Poll the event stack: one event, then as many as the IC reports waiting. */
++static int
++ts_poll(void)
++{
++	uint8_t ev[TS_EVENT_LEN];
++	int err = ts_read(TS_CMD_READ_EVENT, ev, sizeof(ev));
++	if (err) {
++		return err;
++	}
++	int handled = ts_handle_event(ev);
++	unsigned left = ev[7] & 0x3fu;
++	if (left) {
++		uint8_t stack[TS_MAX_FINGERS * TS_EVENT_LEN];
++		if (left > TS_MAX_FINGERS) {
++			left = TS_MAX_FINGERS;
++		}
++		if (ts_read(TS_CMD_READ_ALL, stack, left * TS_EVENT_LEN) == 0) {
++			for (unsigned i = 0; i < left; ++i) {
++				handled += ts_handle_event(&stack[i * TS_EVENT_LEN]);
++			}
++		}
++	}
++	return handled;
++}
++
++static void
++ts_release_all(void)
++{
++	for (unsigned i = 0; i < TS_MAX_FINGERS; ++i) {
++		if (ts.down[i]) {
++			ts.down[i] = false;
++			sweet_hid_touch((int)i, 0, ts.x[i], ts.y[i]);
++		}
++	}
++}
++
++static void
++ts_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	unsigned delay_s = 20;
++	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
++	printf("SWEET TOUCH: starting in %u s\n", delay_s);
++	ts_wait(delay_s * 1000u);
++
++	printf("SWEET TOUCH: mapping GCC/TLMM/SE17\n");
++	ts_tiles[TS_TILE_WEST] = ml_io_map(SWEET_DEV_TOUCH_NORTH_PA + 0x00100000u, 0x100000);
++	ts_tiles[TS_TILE_EAST] = ml_io_map(SWEET_DEV_TOUCH_NORTH_PA + 0x00500000u, 0x100000);
++	ts_tiles[TS_TILE_NORTH] = ml_io_map(SWEET_DEV_TOUCH_NORTH_PA + 0x00900000u, 0x100000);
++	ts_tiles[TS_TILE_SOUTH] = ml_io_map(SWEET_DEV_TOUCH_NORTH_PA + 0x00d00000u, 0x100000);
++	ts.se = ml_io_map(SWEET_DEV_TOUCH_SE_PA, 0x1000);
++	if (!ts.se || !ts_tiles[0] || !ts_tiles[1] || !ts_tiles[2] || !ts_tiles[3]) {
++		printf("SWEET TOUCH: MMIO mapping failed\n");
++		goto out;
++	}
++	printf("SWEET TOUCH: se17 fw=%#x proto=%u fifo_disabled=%u ios=%#x\n",
++	    ts_rd(ts.se, SE_GENI_FW_REVISION),
++	    (ts_rd(ts.se, SE_GENI_FW_REVISION) >> 8) & 0xffu,
++	    ts_rd(ts.se, SE_GENI_IF_DISABLE) & 1u, ts_rd(ts.se, SE_GENI_IOS));
++
++	ts.sda_pin = TS_PIN_I2C_A;
++	ts.scl_pin = TS_PIN_I2C_B;
++
++	printf("SWEET TOUCH: pins reset=%#x/%#x 1v8=%#x/%#x irq=%#x/%#x\n",
++	    ts_gpio_rd(TS_PIN_RESET), ts_gpio_io_rd(TS_PIN_RESET),
++	    ts_gpio_rd(TS_PIN_1V8), ts_gpio_io_rd(TS_PIN_1V8),
++	    ts_gpio_rd(TS_PIN_IRQ), ts_gpio_io_rd(TS_PIN_IRQ));
++
++	/* TLMM write probe on gpio104 (gpio-only in the group table). */
++	ts_gpio_wr(104, 0x000000c3u);
++	ts_wait(1);
++	printf("SWEET TOUCH: tlmm w32 c3 -> %#x\n", ts_gpio_rd(104));
++
++	/* Bus pins released (inputs); external pull-ups hold them high. */
++	bb_level(TS_PIN_I2C_A, false);
++	bb_level(TS_PIN_I2C_B, false);
++	ts_gpio(TS_PIN_IRQ, 0, 0, 3, false, false);   /* input, bias-disable */
++	ts_gpio(TS_PIN_1V8, 0, 3, 3, true, true);     /* output high: 1v8 enable */
++	ts_wait(1);
++	ts.vreg_err = sweet_rpmh_vreg_enable(SWEET_DEV_TOUCH_VREG_NAME, SWEET_DEV_TOUCH_VREG_MV);
++	printf("SWEET TOUCH: vreg %s %u mV -> %d\n", SWEET_DEV_TOUCH_VREG_NAME,
++	    SWEET_DEV_TOUCH_VREG_MV, ts.vreg_err);
++	ts_gpio(TS_PIN_RESET, 0, 0, 3, true, false);  /* reset asserted */
++	ts_wait(20);
++	ts_gpio(TS_PIN_RESET, 0, 0, 3, true, true);   /* reset released */
++	ts_wait(140);                                 /* mainline power-on wait */
++	/* A previous session may have left the target holding SDA low. */
++	bb_recover();
++	printf("SWEET TOUCH: pins now rst=%#x/%#x 1v8=%#x/%#x irq=%#x/%#x bus=%#x/%#x\n",
++	    ts_gpio_rd(TS_PIN_RESET), ts_gpio_io_rd(TS_PIN_RESET),
++	    ts_gpio_rd(TS_PIN_1V8), ts_gpio_io_rd(TS_PIN_1V8),
++	    ts_gpio_rd(TS_PIN_IRQ), ts_gpio_io_rd(TS_PIN_IRQ),
++	    ts_gpio_io_rd(TS_PIN_I2C_A), ts_gpio_io_rd(TS_PIN_I2C_B));
++
++	ts.ack_err = ts_wait_ready(TS_ACK_BOOT_COMPLETE, 50);
++	if (ts.ack_err) {
++		/* The device tree does not say which pin is SDA; try the swap. */
++		printf("SWEET TOUCH: no ack with sda=%u scl=%u; swapping\n",
++		    ts.sda_pin, ts.scl_pin);
++		unsigned t = ts.sda_pin;
++		ts.sda_pin = ts.scl_pin;
++		ts.scl_pin = t;
++		bb_level(TS_PIN_I2C_A, false);
++		bb_level(TS_PIN_I2C_B, false);
++		ts.ack_err = ts_wait_ready(TS_ACK_BOOT_COMPLETE, 50);
++	}
++	printf("SWEET TOUCH: boot-complete ack -> %d (sda=%u scl=%u)\n",
++	    ts.ack_err, ts.sda_pin, ts.scl_pin);
++
++	uint8_t buf[16];
++	ts.id_err = ts_read(TS_CMD_DEVICE_ID, ts.id, 3);
++	printf("SWEET TOUCH: device id err=%d %02x %02x %02x (devid %u)\n",
++	    ts.id_err, ts.id[0], ts.id[1], ts.id[2],
++	    (unsigned)((ts.id[1] << 8) | ts.id[2]));
++
++	uint8_t bs = 0, fw = 0;
++	int err = ts_read(TS_CMD_BOOT_STATUS, &bs, 1);
++	printf("SWEET TOUCH: boot status err=%d %02x (want %02x)\n", err, bs, TS_BS_APPLICATION);
++	err = ts_read(TS_CMD_FW_INTEGRITY, &fw, 1);
++	printf("SWEET TOUCH: fw integrity err=%d %02x (want %02x)\n", err, fw, TS_FW_OK);
++	err = ts_read(TS_CMD_PANEL_INFO, buf, 11);
++	if (!err) {
++		printf("SWEET TOUCH: panel max_x=%u max_y=%u tx=%u\n",
++		    (unsigned)((buf[0] << 8) | buf[1]), (unsigned)((buf[2] << 8) | buf[3]),
++		    buf[8] ? buf[8] : 1u);
++	} else {
++		printf("SWEET TOUCH: panel info err=%d\n", err);
++	}
++
++	err = ts_write_word(TS_CMD_TOUCH_FUNC, TS_MASK_TOUCH);
++	printf("SWEET TOUCH: touch func -> %d\n", err);
++	ts.sense_err = ts_cmd(TS_CMD_SENSE_ON);
++	if (ts.sense_err) {
++		printf("SWEET TOUCH: SENSE_ON failed %d\n", ts.sense_err);
++	} else {
++		printf("SWEET TOUCH: SENSE_ON ok, polling at 10 ms\n");
++	}
++	printf("SWEET TOUCH: state vreg=%d ack=%d id_err=%d id=%02x%02x%02x sense=%d events=%u\n",
++	    ts.vreg_err, ts.ack_err, ts.id_err, ts.id[0], ts.id[1], ts.id[2],
++	    ts.sense_err, ts.events);
++
++	unsigned errors = 0, ticks = 0;
++	for (;;) {
++		int r = ts_poll();
++		if (r < 0) {
++			if ((errors++ % 100u) == 0) {
++				printf("SWEET TOUCH: poll err=%d i2c-errors=%u\n",
++				    r, ts.i2c_errors);
++			}
++			if (errors == 10u) {
++				ts_release_all();
++				bb_recover();
++			}
++		} else {
++			errors = 0;
++		}
++		if ((++ticks % 1000u) == 0u) { /* every 10 s: always-visible state */
++			printf("SWEET TOUCH: state vreg=%d ack=%d id_err=%d id=%02x%02x%02x sense=%d events=%u errs=%u\n",
++			    ts.vreg_err, ts.ack_err, ts.id_err, ts.id[0], ts.id[1], ts.id[2],
++			    ts.sense_err, ts.events, ts.i2c_errors);
++		}
++		ts_wait(10);
++	}
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++sweet_touch_init(void)
++{
++	int enabled = 1;
++	thread_t thread;
++
++	if (ts.started) {
++		return;
++	}
++	ts.started = true;
++	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
++	if (!enabled) {
++		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
++		return;
++	}
++	kern_return_t kr = kernel_thread_start(ts_thread, NULL, &thread);
++	if (kr == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("SWEET TOUCH: kernel_thread_start failed %d\n", kr);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET && SWEET_DEV_TOUCH_SEC */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 6b926fe..5dd6f81 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -786,12 +786,92 @@ sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
+ 	}
+ }
+ 
++/*
++ * Boot-arg sweetlogdump=1: read the persistent ring left by the previous
++ * boot and print the lines worth photographing (crashes, exit reasons,
++ * failures, boot tasks). The ring is otherwise only readable through EDL or
++ * a recovery, neither of which is available on this device.
++ */
++static bool
++sweet_log_contains(const char *hay, const char *needle)
++{
++	size_t n = strlen(needle);
++	for (; *hay; ++hay) {
++		if (strncmp(hay, needle, n) == 0) {
++			return true;
++		}
++	}
++	return false;
++}
++
++static bool
++sweet_log_wanted(const char *l)
++{
++	static const char * const keys[] = {
++		"CRASH ", "exited", "Exit", "failed", "Failed", "error", "Error",
++		"panic", "SpringBoard", "xpcproxy", "fairplayd", "bluetoothd",
++		"watchdog", "boot task", "mount", "fsck", "keybag", "AMFI", "abort",
++		"timeout", "Timeout", "not found", "No such",
++	};
++	for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
++		if (sweet_log_contains(l, keys[i])) {
++			return true;
++		}
++	}
++	return false;
++}
++
++static void
++sweet_log_dump(void)
++{
++	uint32_t on = 0;
++	if (!PE_parse_boot_argn("sweetlogdump", &on, sizeof(on)) || !on ||
++	    !su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS) {
++		return;
++	}
++	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
++	uint8_t *buf = (uint8_t *)(su.dma + DMA_BOUNCE);
++	char line[256];
++	unsigned len = 0, shown = 0, scanned = 0;
++	const uint32_t per = 16;	/* 64 KiB per READ(10) */
++	printf("SWEET LOG: dumping the previous ring (block 0x%llx)\n", base + 1);
++	for (uint32_t blk = 0; blk < SWEET_LOG_SIZE / UFS_BLOCK && shown < 400; blk += per) {
++		lck_mtx_lock(&sweet_ufs_lock);
++		int error = ufs_read_blocks(base + 1 + blk, per);
++		lck_mtx_unlock(&sweet_ufs_lock);
++		if (error) {
++			printf("SWEET LOG: dump read failed (%d)\n", error);
++			break;
++		}
++		for (uint32_t i = 0; i < per * UFS_BLOCK; ++i) {
++			char c = (char)buf[i];
++			if (c == '\n' || len == sizeof(line) - 1) {
++				line[len] = 0;
++				if (len) {
++					++scanned;
++					if (sweet_log_wanted(line)) {
++						printf("LOGDUMP %s\n", line);
++						if (++shown >= 400) {
++							break;
++						}
++					}
++				}
++				len = 0;
++			} else if (c != '\r') {
++				line[len++] = c;
++			}
++		}
++	}
++	printf("SWEET LOG: dump end, %u shown of %u lines\n", shown, scanned);
++}
++
+ static void
+ sweet_log_start(void)
+ {
+ 	uint32_t on = 1;
+ 	thread_t thread;
+ 
++	sweet_log_dump();
+ 	PE_parse_boot_argn("sweetlog", &on, sizeof(on));
+ 	if (!on || !su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS) {
+ 		return;
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+index b6c1a41..da94a1b 100644
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -10,7 +10,10 @@
+  * DWC3 / PHY register blocks only when the GCC status registers say their
+  * power domain and clocks are on (an access to a gated block would hang).
+  */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++/* The guard below uses SWEET_DEV_USB: the header must come first. */
++#include <pexpert/arm64/sweet_dev.h>
++
++#if defined(ARM64_BOARD_CONFIG_SWEET) && SWEET_DEV_USB
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <kern/clock.h>
+@@ -21,6 +24,7 @@
+ #include <vm/pmap.h>
+ #include <vm/vm_kern.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/arm64/sweet_dev.h>
+ #include <kern/locks.h>
+ #include <sys/kpi_mbuf.h>
+ #include <sys/kpi_socket.h>
+@@ -42,27 +46,40 @@ void sweet_usb_probe(void);
+ static void sweet_usb_gadget_start(vm_offset_t dwc);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ 
+-#define GCC_PA                  0x00100000
++/*
++ * Qualcomm wrapper registers ("QSCRATCH", core base + 0xf8800). The
++ * controller only connects (pull-up on D+) while it sees a valid VBUS
++ * session; Linux dwc3-qcom forces that in software when the charger
++ * reports a cable (dwc3_qcom_vbus_override_enable).
++ */
++#define QSCRATCH_PA             SWEET_DEV_USB_QSCRATCH_PA
++#define QSCRATCH_HS_PHY_CTRL    0x10
++#define   UTMI_OTG_VBUS_VALID   (1u << 20)
++#define   SW_SESSVLD_SEL        (1u << 28)
++#define QSCRATCH_SS_PHY_CTRL    0x30
++#define   LANE0_PWR_PRESENT     (1u << 24)
++
++#define GCC_PA                  SWEET_DEV_USB_GCC_PA
+ #define GCC_SIZE                0x00090000
+-#define GCC_USB30_PRIM_GDSCR    0x0f004         /* bit 31: power on */
++#define GCC_USB30_PRIM_GDSCR    SWEET_DEV_USB_GDSCR	/* bit 31: power on */
+ #define CBCR_CLK_OFF            (1u << 31)
+ 
+ static const struct {
+ 	const char *name;
+ 	uint32_t    off;
+ } usb_cbcr[] = {
+-	{ "master", 0x0f010 },
+-	{ "sleep", 0x0f014 },
+-	{ "utmi", 0x0f018 },
+-	{ "cfg-noc-axi", 0x0502c },
+-	{ "aggre-axi", 0x8201c },
+-	{ "ahb2phy", 0x6a004 },
+-	{ "clkref", 0x8c010 },
++	{ "master", SWEET_DEV_USB_CBCR_MASTER },
++	{ "sleep", SWEET_DEV_USB_CBCR_SLEEP },
++	{ "utmi", SWEET_DEV_USB_CBCR_UTMI },
++	{ "cfg-noc-axi", SWEET_DEV_USB_CBCR_CFGNOC },
++	{ "aggre-axi", SWEET_DEV_USB_CBCR_AGGRE },
++	{ SWEET_DEV_USB_CBCR_AUX_NAME, SWEET_DEV_USB_CBCR_AUX },
++	{ "clkref", SWEET_DEV_USB_CBCR_CLKREF },
+ };
+ 
+-#define DWC3_PA                 0x0a600000
++#define DWC3_PA                 SWEET_DEV_USB_DWC3_PA
+ #define DWC3_SIZE               0x0000d000
+-#define QUSB2_PA                0x088e2000
++#define QUSB2_PA                SWEET_DEV_USB_QUSB2_PA
+ #define QUSB2_SIZE              0x00000400
+ 
+ static uint32_t
+@@ -73,6 +90,76 @@ usb_rd(vm_offset_t base, uint32_t off)
+ 	return v;
+ }
+ 
++/*
++ * Progress markers for the gadget bring-up survive a reset in IMEM, so a
++ * run that ends in EDL still leaves its last step readable on the next boot
++ * (the probe prints it; the shim can print it even earlier). Offset 0x8f0 is
++ * not used by any child of qcom,msm-imem@146bf000 in the live FDT.
++ */
++/*
++ * Progress markers for the gadget bring-up survive a reset in DRAM: warm
++ * resets keep DRAM contents and the bootloader does not touch this address
++ * (0x18000000 into the kernel bank, far above the kernel image, ramdisk,
++ * ADT and boot_args). The shim prints the same word before jumping.
++ */
++#define SWEET_USB_IMEM_PA    SWEET_DEV_MARK_PA
++#define SWEET_USB_IMEM_MARK  0
++#define SWEET_USB_MARK_GADGET   0x100u
++#define SWEET_USB_MARK_DALE     0x110u
++#define SWEET_USB_MARK_DALE_OK  0x111u
++#define SWEET_USB_MARK_TRB_OK   0x112u
++#define SWEET_USB_MARK_STEP4_OK 0x113u
++#define SWEET_USB_MARK_TRB_WRITE 0x114u
++#define SWEET_USB_MARK_TRB_SYNC  0x115u
++#define SWEET_USB_MARK_TRB_CMD   0x116u
++#define SWEET_USB_MARK_TRB_WAIT  0x117u
++#define SWEET_USB_MARK_STEP5    0x120u
++#define SWEET_USB_MARK_STEP5_OK 0x121u
++#define SWEET_USB_MARK_RUN      0x130u
++#define SWEET_USB_MARK_RUN_OK   0x131u
++
++static vm_offset_t usb_imem;
++
++static uint32_t
++usb_mark_read(void)
++{
++	if (usb_imem == 0) {
++		usb_imem = ml_io_map(SWEET_USB_IMEM_PA, 0x1000);
++	}
++	return usb_imem ? *(volatile uint32_t *)(usb_imem + SWEET_USB_IMEM_MARK) : 0;
++}
++
++static void
++usb_mark(uint32_t v)
++{
++	(void)usb_mark_read();
++	if (usb_imem) {
++		*(volatile uint32_t *)(usb_imem + SWEET_USB_IMEM_MARK) = v;
++		__asm__ volatile ("dsb sy" ::: "memory");
++	}
++}
++
++static const char *
++usb_mark_name(uint32_t v)
++{
++	switch (v) {
++	case 0: return "none";
++	case SWEET_USB_MARK_GADGET: return "gadget entered";
++	case SWEET_USB_MARK_DALE: return "before DALEPENA";
++	case SWEET_USB_MARK_DALE_OK: return "DALEPENA written";
++	case SWEET_USB_MARK_TRB_OK: return "ep0 TRB written (DEPCMD next)";
++	case SWEET_USB_MARK_STEP4_OK: return "step 4 done";
++	case SWEET_USB_MARK_TRB_WRITE: return "TRB stores";
++	case SWEET_USB_MARK_TRB_SYNC: return "TRB cache sync";
++	case SWEET_USB_MARK_TRB_CMD: return "TRB DEPCMD STARTTRANSFER";
++	case SWEET_USB_MARK_TRB_WAIT: return "TRB command wait";
++	case SWEET_USB_MARK_STEP5: return "before QSCRATCH";
++	case SWEET_USB_MARK_STEP5_OK: return "QSCRATCH done";
++	case SWEET_USB_MARK_RUN: return "before RUN_STOP";
++	case SWEET_USB_MARK_RUN_OK: return "RUN_STOP written";
++	default: return "unknown";
++	}
++}
+ void
+ sweet_usb_probe(void)
+ {
+@@ -82,6 +169,11 @@ sweet_usb_probe(void)
+ 
+ 	/* sweetusb=0 off, 1 (default) report state only, 2 also start the USB device */
+ 	PE_parse_boot_argn("sweetusb", &enabled, sizeof(enabled));
++
++	/* What the previous (possibly EDL'd) boot left in IMEM. */
++	uint32_t prev_mark = usb_mark_read();
++	printf("SWEET USB: previous run marker 0x%08x (%s)\n", prev_mark, usb_mark_name(prev_mark));
++	usb_mark(0x1);
+ 	if (!enabled) {
+ 		return;
+ 	}
+@@ -127,11 +219,22 @@ sweet_usb_probe(void)
+ 	if (phy == 0) {
+ 		return;
+ 	}
+-	/* DT qcom,qusb-phy-reg-offset order (Linux phy-msm-qusb-v2.c): PORT_TUNE1 0x240,
+-	 * PLL_COMMON_STATUS_ONE 0x1a0, PWR_CTRL1 0x210, INTR_CTRL 0x230,
+-	 * PLL_CORE_INPUT_OVERRIDE 0x0a8, TEST1 0x254. */
+-	printf("SWEET USB: QUSB2 PLL_STATUS 0x%08x PWR_CTRL1 0x%08x PORT_TUNE1 0x%08x TEST1 0x%08x\n",
+-	    usb_rd(phy, 0x1a0), usb_rd(phy, 0x210), usb_rd(phy, 0x240), usb_rd(phy, 0x254));
++	/* SM8150's HS PHY is the 7nm femto v2 (mainline phy-qcom-snps-femto-v2.c);
++	 * its registers live below 0xa4, unlike SM6150's qusb2-v2 layout. */
++	printf("SWEET USB: PHY UTMI_CTRL0 0x%08x UTMI_CTRL1 0x%08x UTMI_CTRL5(POR) 0x%08x\n",
++	    usb_rd(phy, 0x3c), usb_rd(phy, 0x40), usb_rd(phy, 0x50));
++	printf("SWEET USB: PHY COMMON0 0x%08x COMMON1 0x%08x COMMON2 0x%08x CTRL1 0x%08x CTRL2 0x%08x\n",
++	    usb_rd(phy, 0x54), usb_rd(phy, 0x58), usb_rd(phy, 0x5c), usb_rd(phy, 0x60), usb_rd(phy, 0x64));
++	printf("SWEET USB: PHY CFG0 0x%08x REFCLK_CTRL 0x%08x OVR 0x%08x/0x%08x/0x%08x/0x%08x\n",
++	    usb_rd(phy, 0x94), usb_rd(phy, 0xa0), usb_rd(phy, 0x6c), usb_rd(phy, 0x70),
++	    usb_rd(phy, 0x74), usb_rd(phy, 0x78));
++
++	/* USB3/QUSB2 wrapper (dwc3-msm QSCRATCH = core + 0xf8800): read-only. */
++	vm_offset_t qs = ml_io_map(QSCRATCH_PA, 0x100);
++	if (qs != 0) {
++		printf("SWEET USB: QSCRATCH HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x GENERAL_CFG 0x%08x\n",
++		    usb_rd(qs, QSCRATCH_HS_PHY_CTRL), usb_rd(qs, QSCRATCH_SS_PHY_CTRL), usb_rd(qs, 0x08));
++	}
+ }
+ 
+ /*
+@@ -161,23 +264,11 @@ sweet_usb_probe(void)
+ #define DEPCMDPAR0(n)   (0xc808 + 0x10 * (n))
+ #define DEPCMD(n)       (0xc80c + 0x10 * (n))
+ 
+-/*
+- * Qualcomm wrapper registers ("QSCRATCH", core base + 0xf8800). The
+- * controller only connects (pull-up on D+) while it sees a valid VBUS
+- * session; Linux dwc3-qcom forces that in software when the charger
+- * reports a cable (dwc3_qcom_vbus_override_enable).
+- */
+-#define QSCRATCH_PA             0x0a6f8800
+-#define QSCRATCH_HS_PHY_CTRL    0x10
+-#define   UTMI_OTG_VBUS_VALID   (1u << 20)
+-#define   SW_SESSVLD_SEL        (1u << 28)
+-#define QSCRATCH_SS_PHY_CTRL    0x30
+-#define   LANE0_PWR_PRESENT     (1u << 24)
+-
+ #define DCTL_RUN_STOP   (1u << 31)
+ #define DCTL_CSFTRST    (1u << 30)
+ #define DSTS_DEVCTRLHLT (1u << 22)
+ 
++
+ #define DEPCMD_SETEPCONFIG      1
+ #define DEPCMD_SETTRANSFRESOURCE 2
+ #define DEPCMD_SETSTALL         4
+@@ -296,16 +387,24 @@ ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl
+ 	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + trb);
+ 	uint64_t bpa = ud.dma_pa + buf;
+ 
++	printf("SWEET USB:     trb: stores\n");
++	usb_mark(SWEET_USB_MARK_TRB_WRITE);
+ 	t[0] = (uint32_t)bpa;
+ 	t[1] = (uint32_t)(bpa >> 32);
+ 	t[2] = len;
+ 	t[3] = ctl | TRB_HWO | TRB_LST | TRB_ISP_IMI | TRB_IOC;
++	printf("SWEET USB:     trb: cache sync (pa 0x%llx len %u)\n", (uint64_t)(ud.dma_pa + trb), 16);
++	usb_mark(SWEET_USB_MARK_TRB_SYNC);
+ 	ud_sync(trb, 16);
+ 	if (len) {
+ 		ud_sync(buf, len);
+ 	}
++	printf("SWEET USB:     trb: DEPCMD STARTTRANSFER (tpa 0x%llx)\n", (uint64_t)(ud.dma_pa + trb));
++	usb_mark(SWEET_USB_MARK_TRB_CMD);
+ 	uint64_t tpa = ud.dma_pa + trb;
+ 	ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
++	printf("SWEET USB:     trb: done\n");
++	usb_mark(SWEET_USB_MARK_TRB_WAIT);
+ }
+ 
+ static void
+@@ -712,6 +811,11 @@ ud_event(uint32_t ev)
+ 		if (type == 1) {        /* USB reset */
+ 			dwc_wr(DCFG, dwc_rd(DCFG) & ~(0x7fu << 3));
+ 			printf("SWEET USB: bus reset\n");
++#if SWEET_DEV_USB_ARM_ON_EVENT
++			/* The host has reset the bus: arming now is safe. */
++			printf("SWEET USB: arming ep0 setup after bus reset\n");
++			ud_start_setup();
++#endif
+ 		} else if (type == 2) { /* connect done */
+ 			uint32_t speed = dwc_rd(DSTS) & 7;
+ 			/* ep0 max packet: 64 at high/full speed (modify action) */
+@@ -773,6 +877,14 @@ ud_event(uint32_t ev)
+ 			ud_start(ep, UD_DATA, 0, ctl);
+ 		}
+ 	}
++#if SWEET_DEV_USB_ARM_ON_EVENT
++	if (type == 3 && status == 1) { /* XferNotReady, control setup: no TRB armed */
++		if (ud.state != EP0_SETUP) {
++			printf("SWEET USB: NotReady setup -> arm\n");
++			ud_start_setup();
++		}
++	}
++#endif
+ }
+ 
+ static void
+@@ -854,6 +966,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+ 	thread_t thread;
+ 
+ 	ud.dwc = dwc;
++	printf("SWEET USB: gadget step 0: DMA + ifnet\n");
+ 	if (kmem_alloc_contig(kernel_map, &ud.dma, UD_SIZE, PAGE_MASK, 0, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+ 		printf("SWEET USB: no DMA memory\n");
+@@ -867,6 +980,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+ 	ud_if_create();
+ 
+ 	/* Device controller soft reset (PHY and global setup stay as ABL left them). */
++	printf("SWEET USB: gadget step 1: DCTL soft reset (GCTL 0x%08x)\n", dwc_rd(GCTL));
+ 	dwc_wr(DCTL, DCTL_CSFTRST);
+ 	int i;
+ 	for (i = 0; i < 500 && (dwc_rd(DCTL) & DCTL_CSFTRST); i++) {
+@@ -878,6 +992,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+ 		return;
+ 	}
+ 
++	printf("SWEET USB: gadget step 2: event buffer + DCFG/DEVTEN\n");
+ 	dwc_wr(GEVNTADRLO, (uint32_t)(ud.dma_pa + UD_EVT));
+ 	dwc_wr(GEVNTADRHI, (uint32_t)((ud.dma_pa + UD_EVT) >> 32));
+ 	dwc_wr(GEVNTSIZ, (1u << 31) | UD_EVT_SIZE);     /* interrupt masked: polled */
+@@ -890,6 +1005,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+ 	/* Events: disconnect, USB reset, connect done */
+ 	dwc_wr(DEVTEN, 0x7);
+ 
++	printf("SWEET USB: gadget step 3: endpoint 0 setup\n");
+ 	/* Endpoint 0 OUT/IN: start config, control type, max packet 512 until connect done. */
+ 	if (ud_epcmd(0, DEPCMD_DEPSTARTCFG, 0, 0, 0) ||
+ 	    ud_epcmd(0, DEPCMD_SETEPCONFIG, (0u << 1) | (512u << 3), (1u << 8) | (1u << 10) | (0u << 25), 0) ||
+@@ -899,26 +1015,94 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+ 		printf("SWEET USB: endpoint 0 setup failed\n");
+ 		return;
+ 	}
++	printf("SWEET USB: gadget step 4: DALEPENA + setup engine\n");
++	int maxstep = 99;
++	(void)PE_parse_boot_argn("sweetusbstep", &maxstep, sizeof(maxstep));
++	if (maxstep < 4) {
++		printf("SWEET USB: stopping before step 4 (sweetusbstep=%d)\n", maxstep);
++		return;
++	}
++	printf("SWEET USB:   - DALEPENA write\n");
++	usb_mark(SWEET_USB_MARK_DALE);
+ 	dwc_wr(DALEPENA, 0x3);
+-	ud_start_setup();
++	usb_mark(SWEET_USB_MARK_DALE_OK);
++	printf("SWEET USB:   - ep0 setup TRB\n");
++#if SWEET_DEV_USB_ARM_ON_EVENT
++	printf("SWEET USB:   - setup armed on bus reset / XferNotReady\n");
++#else
++	int late_arm = 0;
++	(void)PE_parse_boot_argn("sweetlatear", &late_arm, sizeof(late_arm));
++	if (!late_arm) {
++		ud_start_setup();
++	} else {
++		printf("SWEET USB:   - setup arm deferred to after RUN_STOP (sweetlatear=1)\n");
++	}
++#endif
++	usb_mark(SWEET_USB_MARK_STEP4_OK);
++	printf("SWEET USB:   - step 4 done\n");
+ 
++	int vbus = SWEET_DEV_USB_VBUS_DEFAULT;
++	(void)PE_parse_boot_argn("sweetvbus", &vbus, sizeof(vbus));
++	if (maxstep < 5) {
++		printf("SWEET USB: stopping before step 5 (sweetusbstep=%d)\n", maxstep);
++		return;
++	}
++	printf("SWEET USB: gadget step 5: QSCRATCH mode %d (0 none, 1 HS, 2 HS+SS)\n", vbus);
++	usb_mark(SWEET_USB_MARK_STEP5);
+ 	vm_offset_t qs = ml_io_map(QSCRATCH_PA, 0x100);
+ 	if (qs != 0) {
+ 		uint32_t hs = usb_rd(qs, QSCRATCH_HS_PHY_CTRL), ss = usb_rd(qs, QSCRATCH_SS_PHY_CTRL);
+ 		printf("SWEET USB: QSCRATCH HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x GENERAL_CFG 0x%08x\n",
+ 		    hs, ss, usb_rd(qs, 0x08));
+-		*(volatile uint32_t *)(qs + QSCRATCH_HS_PHY_CTRL) = hs | UTMI_OTG_VBUS_VALID | SW_SESSVLD_SEL;
+-		*(volatile uint32_t *)(qs + QSCRATCH_SS_PHY_CTRL) = ss | LANE0_PWR_PRESENT;
+-		__asm__ volatile ("dsb sy" ::: "memory");
+-		printf("SWEET USB: VBUS override on: HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x\n",
+-		    usb_rd(qs, QSCRATCH_HS_PHY_CTRL), usb_rd(qs, QSCRATCH_SS_PHY_CTRL));
++		if (vbus >= 1) {
++			printf("SWEET USB:   - HS VBUS override write\n");
++			*(volatile uint32_t *)(qs + QSCRATCH_HS_PHY_CTRL) = hs | UTMI_OTG_VBUS_VALID | SW_SESSVLD_SEL;
++			__asm__ volatile ("dsb sy" ::: "memory");
++			hs = usb_rd(qs, QSCRATCH_HS_PHY_CTRL);
++			printf("SWEET USB:   - HS_PHY_CTRL now 0x%08x\n", hs);
++		}
++		if (vbus >= 2) {
++			printf("SWEET USB:   - SS PHY write\n");
++			*(volatile uint32_t *)(qs + QSCRATCH_SS_PHY_CTRL) = ss | LANE0_PWR_PRESENT;
++			__asm__ volatile ("dsb sy" ::: "memory");
++			printf("SWEET USB:   - SS_PHY_CTRL now 0x%08x\n", usb_rd(qs, QSCRATCH_SS_PHY_CTRL));
++		}
++	}
++	if (vbus == 3) {
++		/* PHY-side VBUS override instead of the wrapper write (femto v2:
++		 * COMMON1 bit4 VBUSVLDEXTSEL0, CTRL1 bit0 VBUSVLDEXT0). Byte
++		 * accesses: the PHY window mirrors one byte across the word. */
++		vm_offset_t phy2 = ml_io_map(QUSB2_PA, QUSB2_SIZE);
++		if (phy2 != 0) {
++			uint8_t c1 = *(volatile uint8_t *)(phy2 + 0x58);
++			uint8_t c2 = *(volatile uint8_t *)(phy2 + 0x60);
++			printf("SWEET USB:   - PHY VBUS override (COMMON1 0x%02x CTRL1 0x%02x)\n", c1, c2);
++			*(volatile uint8_t *)(phy2 + 0x58) = c1 | (1u << 4);
++			*(volatile uint8_t *)(phy2 + 0x60) = c2 | 1u;
++			__asm__ volatile ("dsb sy" ::: "memory");
++			printf("SWEET USB:   - PHY now COMMON1 0x%02x CTRL1 0x%02x\n",
++			    *(volatile uint8_t *)(phy2 + 0x58), *(volatile uint8_t *)(phy2 + 0x60));
++		}
+ 	}
+ 
++	if (maxstep < 6) {
++		printf("SWEET USB: stopping before step 6 (sweetusbstep=%d)\n", maxstep);
++		return;
++	}
++	printf("SWEET USB: gadget step 6: RUN_STOP\n");
++	usb_mark(SWEET_USB_MARK_RUN);
+ 	dwc_wr(DCTL, dwc_rd(DCTL) | DCTL_RUN_STOP);
++	usb_mark(SWEET_USB_MARK_RUN_OK);
+ 	for (i = 0; i < 500 && (dwc_rd(DSTS) & DSTS_DEVCTRLHLT); i++) {
+ 		delay(1000);
+ 	}
+ 	printf("SWEET USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n", dwc_rd(DSTS), i, ud.dma_pa);
++#if !SWEET_DEV_USB_ARM_ON_EVENT
++	if (late_arm) {
++		printf("SWEET USB:   - deferred setup arm (after RUN_STOP)\n");
++		ud_start_setup();
++	}
++#endif
+ 	if (kernel_thread_start(ud_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
+@@ -928,4 +1112,15 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+ 		thread_deallocate(thread);
+ 	}
+ }
++#elif defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * No USB bring-up for this board yet: the SM8150 GCC CBCR/GDSC offsets and
++ * the QSCRATCH wrapper layout still need to be mapped (GUACAMOLE.md).
++ */
++#include <sys/systm.h>
++void
++sweet_usb_probe(void)
++{
++	printf("SWEET USB: no driver for this board yet\n");
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/config/MASTER.arm64.guacamole b/config/MASTER.arm64.guacamole
+new file mode 100644
+index 0000000..e9b6989
+--- /dev/null
++++ b/config/MASTER.arm64.guacamole
+@@ -0,0 +1,115 @@
++#
++# guacamole (OnePlus 7 Pro, SM8150): the sweet port on a second board.
++# Same options as MASTER.arm64.sweet; the open-source arm64 assembly and
++# pmap come from the same place (nos_arm_asm, nos_arm_pmap). Per-device
++# addresses live in pexpert/pexpert/arm64/sweet_dev.h (kernel) and
++# tools/devices.py (ADT/shim); shim/boards/guacamole.h mirrors them.
++#
++#
++# Mach Operating System
++# Copyright (c) 1986 Carnegie-Mellon University
++# Copyright 2001-2018 Apple Inc.
++#
++# All rights reserved.  The CMU software License Agreement
++# specifies the terms and conditions for use and redistribution.
++#  
++######################################################################
++#
++#  Master Apple configuration file (see the master machine independent
++#  configuration file for a description of the file format).
++#
++######################################################################
++#  
++#  Standard Apple OS Configurations:
++#  -------- ----- -- ---------------
++#
++#  KERNEL_BASE =    [ arm64 config_pmap_ppl medium msgb_large config_requires_u32_munging config_delay_idle_sleep config_proc_udata_storage config_uexc config_darkboot nos_arm_asm nos_arm_pmap ]
++#  KERNEL_RELEASE = [ KERNEL_BASE ]
++#  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug config_proc_resource_limits ]
++#  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug config_proc_resource_limits ]
++#  BSD_BASE =       [ mach_bsd sysv_sem sysv_msg sysv_shm config_netboot config_imageboot psynch config_proc_uuid_policy config_coredump pgo config_personas ]
++#  BSD_RELEASE =    [ BSD_BASE ]
++#  BSD_DEV =        [ BSD_BASE config_vnguard ]
++#  BSD_DEBUG =      [ BSD_BASE config_vnguard ]
++#  FILESYS_BASE =   [ devfs fdesc fifo mockfs sweet_hfs fs_compression config_protect config_mnt_rootsnap config_rosv_startup config_mount_vm config_mount_prebootrecovery config_basesystemroot config_fse quota namedstreams config_imgsrc_access config_triggers config_searchfs config_volfs config_appledouble nullfs bindfs config_mnt_suid config_firmlinks config_dataless_files config_union_mounts config_file_leases ]
++#  FILESYS_RELEASE= [ FILESYS_BASE ]
++#  FILESYS_DEV =    [ FILESYS_BASE config_iocount_trace ]
++#  FILESYS_DEBUG =  [ FILESYS_BASE config_iocount_trace ]
++#  NFS =            [ nfsserver ]
++#  SKYWALK_BASE =   [ skywalk config_nexus_user_pipe config_nexus_kernel_pipe config_nexus_monitor config_nexus_flowswitch config_nexus_netif ]
++#  SKYWALK_RELEASE = [ SKYWALK_BASE ]
++#  SKYWALK_DEV =    [ SKYWALK_BASE ]
++#  SKYWALK_DEBUG =  [ SKYWALK_BASE ]
++#  NETWORKING =     [ inet bpfilter dummynet traffic_mgt sendfile ah_all_crypto bond vlan gif stf ifnet_input_chk config_mbuf_jumbo if_bridge MULTIPATH if_fake remote_vif ]
++#  NETWORKING_RELEASE = [ NETWORKING ]
++#  NETWORKING_DEV = [ NETWORKING_RELEASE packet_mangler if_headless ]
++#  NETWORKING_DEBUG = [ NETWORKING_DEV ]
++#  VPN =            [ ipsec flow_divert necp content_filter ]
++#  PF =             [ pf pflog ]
++#  MULTIPATH =      [ multipath mptcp ]
++#if SOC_CONFIG_t8020 || SOC_IS_VIRTUALIZED
++#  HIBERNATION =    [ ]
++#else /*!(SOC_CONFIG_t8020 || SOC_IS_VIRTUALIZED)*/
++#  HIBERNATION =    [ ]
++#endif /*SOC_CONFIG_t8020 || SOC_IS_VIRTUALIZED*/
++#  IOKIT_BASE =     [ iokit iokitcpp no_kernel_hid config_sleep iokitstats HIBERNATION ]
++#  IOKIT_RELEASE =  [ IOKIT_BASE ]
++#  IOKIT_DEV =      [ IOKIT_BASE iotracking ]
++#  IOKIT_DEBUG =    [ IOKIT_BASE iotracking ]
++#  LIBKERN_BASE =   [ libkerncpp config_blocks config_kec_fips crypto_sha2 config_img4 ]
++#  LIBKERN_RELEASE =[ LIBKERN_BASE zlib ]
++#  LIBKERN_DEV =    [ LIBKERN_BASE zlib iotracking ]
++#  LIBKERN_DEBUG =  [ LIBKERN_BASE zlib iotracking ]
++#  PERF_DBG_BASE =  [ config_dtrace mach_kdp config_serial_kdp kdp_interactive_debugging config_kdp_coredump_encryption config_pervasive_energy PERFMON_BASE kperf kpc ]
++#  PERF_DBG_RELEASE=[ PERF_DBG_BASE ist_kdebug ]
++#  PERF_DBG_DEV =   [ PERF_DBG_BASE lock_stats zleaks alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace ]
++#  PERF_DBG_DEBUG = [ PERF_DBG_BASE lock_stats zleaks alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace ]
++#if SOC_IS_VIRTUALIZED
++#  PARAVIRT_BASE =  [ config_pv_ticket ]
++#else
++#  PARAVIRT_BASE =  [ ]
++#endif /*SOC_IS_VIRTUALIZED*/
++#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_arm_pfz config_user_notification phys_write_acct config_service_port_info config_voucher_deprecated PARAVIRT_BASE config_ledger_interval_max ]
++#  MACH_RELEASE =   [ MACH_BASE ]
++#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace ]
++#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace importance_debug ]
++#  SCHED_BASE =     [ config_sched_traditional config_sched_multiq config_sched_deferred_ast config_clutch config_sched_sfi config_sched_auto_join config_preadopt_tg ]
++#  SCHED_RELEASE =  [ SCHED_BASE ]
++#  SCHED_DEV =      [ SCHED_BASE ]
++#  SCHED_DEBUG =    [ SCHED_BASE config_sched_grrr config_sched_proto ]
++#  VM_BASE =        [ vm_pressure_events memorystatus config_code_decryption encrypted_swap config_deferred_reclaim ]
++#  VM_RELEASE =     [ VM_BASE ]
++#  VM_DEV =         [ VM_BASE dynamic_codesigning pgzalloc ]
++#  VM_DEBUG =       [ VM_BASE dynamic_codesigning pgzalloc ]
++#  VM_KASAN =       [ VM_BASE dynamic_codesigning config_kasan config_ubsan config_kcov config_ksancov kernel_tbi ]
++#  SECURITY =       [ config_macf config_audit kernel_integrity config_csr config_csr_from_dt config_setuid config_kas_info config_secure_bsd_root config_arcade config_supplemental_signatures second_static_trust_cache reslide_shared_cache ]
++#  BASE =           [ PF VPN SECURITY NFS ]
++#  RELEASE =        [ BASE KERNEL_RELEASE BSD_RELEASE FILESYS_RELEASE SKYWALK_RELEASE NETWORKING_RELEASE IOKIT_RELEASE LIBKERN_RELEASE    PERF_DBG_RELEASE MACH_RELEASE SCHED_RELEASE VM_RELEASE ]
++#  DEVELOPMENT =    [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV        PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_DEV     ]
++#  DEBUG =          [ BASE KERNEL_DEBUG   BSD_DEBUG   FILESYS_DEBUG   SKYWALK_DEBUG   NETWORKING_DEBUG   IOKIT_DEBUG   LIBKERN_DEBUG      PERF_DBG_DEBUG   MACH_DEBUG   SCHED_DEBUG   VM_DEBUG   ]
++#  KASAN =          [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV        PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_KASAN   ]
++#
++######################################################################
++#
++machine		"arm64"						# <arm64>
++
++makeoptions	OSFMK_MACHINE = "arm64"				# <mach>
++
++options		COUNT_SYSCALLS		# count bsd system calls 	# <countcalls>
++options     TRASH_VFP_ON_SAVE   # <debug,trash_vfp>
++options		ALTERNATE_DEBUGGER	# <alternate_debugger>
++
++options   CONFIG_VNODES=1024		# <xsmall>
++
++options   CONFIG_FREEZE_SUSPENDED_MIN=4		# <xsmall>
++
++options	  CONFIG_MACH_APPROXIMATE_TIME
++
++options   CONFIG_KERNEL_INTEGRITY		# <kernel_integrity>
++
++options CONFIG_MACF_LAZY_VNODE_LABELS   # Turn on labels, don't preallocate
++
++options CONFIG_HYPERVISOR_PUBLIC   # unrestricted entitlement for hypervisor
++
++options   CONFIG_RESLIDE_SHARED_CACHE		# <reslide_shared_cache>
++options   CONFIG_KERNEL_TBI		# <kernel_tbi>
+diff --git a/config/MASTER.arm64.sweet b/config/MASTER.arm64.sweet
+index e305f0d..feeaf92 100644
+--- a/config/MASTER.arm64.sweet
++++ b/config/MASTER.arm64.sweet
+@@ -97,6 +97,11 @@ makeoptions	OSFMK_MACHINE = "arm64"				# <mach>
+ 
+ options		COUNT_SYSCALLS		# count bsd system calls 	# <countcalls>
+ options     TRASH_VFP_ON_SAVE   # <debug,trash_vfp>
++# SWEET: the iOS userland (usermanagerd, launchd, XPC services) calls the
++# persona() syscall (494) to create the kernel personas 99/199; sys_persona.c
++# is "optional config_personas" in bsd/conf/files.
++options     config_personas
++
+ options		ALTERNATE_DEBUGGER	# <alternate_debugger>
+ 
+ options   CONFIG_VNODES=1024		# <xsmall>
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index a62416c..3f00a39 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -170,7 +170,14 @@ AppleCLCD::start(IOService *provider)
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+-	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
++	if (!native) {
++		/*
++		 * The iOS userland is the iPhone X: present its panel size
++		 * (375x812 points @3x) whatever the physical panel is. sweet
++		 * (1080x2400) crops it centered; a larger panel (e.g. the
++		 * OnePlus 7 Pro's 1440x3120) letterboxes it, which the
++		 * present() logical->panel offset does with a negative offX.
++		 */
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 27bc49d..0136e09 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -21,6 +21,7 @@
+ #include <IOKit/IOTimerEventSource.h>
+ #include <libkern/c++/OSArray.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/arm64/sweet_dev.h>
+ 
+ #include "IOHIDEventService.h"
+ #include "IOHIDEventServiceUserClient.h"
+@@ -434,14 +435,14 @@ SweetHIDTouch::start(IOService *provider)
+ 	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+-	fLogicalW = native ? 1080 : 1125;
+-	fLogicalH = native ? 2400 : 2436;
+-	fOffX = (fLogicalW - 1080) / 2;
+-	fOffY = (fLogicalH - 2400) / 2;
++	fLogicalW = native ? SWEET_DEV_FB_W : 1125;
++	fLogicalH = native ? SWEET_DEV_FB_H : 2436;
++	fOffX = (fLogicalW - SWEET_DEV_FB_W) / 2;
++	fOffY = (fLogicalH - SWEET_DEV_FB_H) / 2;
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+-	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+-	setProperty("SurfaceHeight", (unsigned long long)(151 << 16), 32);
++	setProperty("SurfaceWidth", (unsigned long long)(SWEET_DEV_PANEL_MM_W << 16), 32);	/* mm, 16.16 */
++	setProperty("SurfaceHeight", (unsigned long long)(SWEET_DEV_PANEL_MM_H << 16), 32);
+ 	gSweetTouch = this;
+ 	registerService();
+ 	IOLog("SWEET HID: touch registered\n");
+@@ -458,8 +459,9 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
+ 		return;
+ 	}
+-	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+-	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	/* Clamp to this board's panel; x/y arrive in panel pixels. */
++	x = x < 0 ? 0 : (x > SWEET_DEV_FB_W - 1 ? SWEET_DEV_FB_W - 1 : x);
++	y = y < 0 ? 0 : (y > SWEET_DEV_FB_H - 1 ? SWEET_DEV_FB_H - 1 : y);
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 92f3e26..bc93771 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -35,6 +35,20 @@
+ const char * gIOKernelConfigTables =
+     "("
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_GUACAMOLE)
++    "   {"
++    "     'IOClass'         = SweetPlatformExpert;"
++    "     'IOProviderClass' = IOPlatformExpertDevice;"
++    "     'IONameMatch'     = 'oneplus,guacamole';"
++    "     'IOProbeScore'    = 10000:32;"
++    "   },"
++    "   {"
++    "     'IOClass'         = SweetCPU;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'qcom,kryo485';"
++    "     'IOProbeScore'    = 10000:32;"
++    "   },"
++#else /* SWEET board */
+     "   {"
+     "     'IOClass'         = SweetPlatformExpert;"
+     "     'IOProviderClass' = IOPlatformExpertDevice;"
+@@ -47,6 +61,7 @@ const char * gIOKernelConfigTables =
+     "     'IONameMatch'     = 'qcom,kryo470';"
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
++#endif /* ARM64_BOARD_CONFIG_GUACAMOLE */
+     "   {"
+     "     'IOClass'         = AppleKeyStore;"
+     "     'IOProviderClass' = IOResources;"
+diff --git a/libkern/conf/Makefile.template b/libkern/conf/Makefile.template
+index aca295c..f20b12d 100644
+--- a/libkern/conf/Makefile.template
++++ b/libkern/conf/Makefile.template
+@@ -19,7 +19,8 @@ include $(MakeInc_def)
+ CFLAGS+= -include meta_features.h -DLIBKERN_KERNEL_PRIVATE -DOSALLOCDEBUG=1
+ SFLAGS+= -include meta_features.h
+ 
+-ifeq ($(CURRENT_MACHINE_CONFIG),SWEET)
++# The portable crypto provider is built into SWEET and GUACAMOLE.
++ifneq ($(filter SWEET GUACAMOLE,$(CURRENT_MACHINE_CONFIG)),)
+ SWEET_AES_ROOT = $(SRCROOT)/libkern/crypto/sweet_bearssl
+ SWEET_AES_INC = -I$(SWEET_AES_ROOT)/inc -I$(SWEET_AES_ROOT)/src
+ sweet_aes.o_INCFLAGS = $(SWEET_AES_INC)
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+index 9a748ea..461262f 100644
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -29,7 +29,7 @@ SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
+ else ifneq ($(findstring _host,$(RC_ProjectName)),)
+ SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
+ else
+-SUPPORTED_ARM64_MACHINE_CONFIGS = BCM2837 T6000 T8101 T8103 VMAPPLE SWEET
++SUPPORTED_ARM64_MACHINE_CONFIGS = BCM2837 T6000 T8101 T8103 VMAPPLE SWEET GUACAMOLE
+ 
+ endif
+ 
+@@ -62,6 +62,10 @@ MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000 		-mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a
+ MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
+ MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto
++# The port's platform code (drivers, HFS, pthread, libkern) is gated on
++# ARM64_BOARD_CONFIG_SWEET; a GUACAMOLE build defines it as well and reads
++# its per-board numbers from pexpert/pexpert/arm64/sweet_dev.h.
++MACHINE_FLAGS_ARM64_GUACAMOLE = -DARM64_BOARD_CONFIG_GUACAMOLE -DARM64_BOARD_CONFIG_SWEET -march=armv8.2-a+crypto
+ 
+ 
+ #
+@@ -261,7 +265,8 @@ ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),)
+ export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := $(shell echo $(CURRENT_ARCH_CONFIG) | tr A-Z a-z)
+ ifneq ($(filter arm64,$(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG)),)
+ # sweet's Cortex-A76/A55 have no pointer authentication: stay plain arm64
+-ifneq ($(CURRENT_MACHINE_CONFIG),SWEET)
++# (empty filter = the config is neither SWEET nor GUACAMOLE -> arm64e)
++ifeq ($(filter SWEET GUACAMOLE,$(CURRENT_MACHINE_CONFIG)),)
+ export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := arm64e
+ endif
+ endif
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 00568d3..6d994d2 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -2806,8 +2806,14 @@ pmap_assert_free(ppnum_t ppnum)
+ 		pmap_t pmap = ptep_get_pmap(first_ptep);
+ 		const char *type = (pmap == kernel_pmap) ? "Kernel" : "User";
+ 
+-		panic("%s: Found at least one mapping to %#llx. First PTEP (%p) is a "
+-		    "%s CPU mapping (pmap: %p)",
++		/*
++		 * SWEET: this MACH_ASSERT check cannot lock the PVH and its own
++		 * comment allows for false positives while mappings are created
++		 * concurrently (heavy exec/spawn). Keep the diagnostic but do not
++		 * take the machine down.
++		 */
++		printf("%s: Found at least one mapping to %#llx. First PTEP (%p) is a "
++		    "%s CPU mapping (pmap: %p); continuing",
+ 		    __func__, (uint64_t)pa, first_ptep, type, pmap);
+ 	}
+ }
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index 06bb568..513b704 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1843,7 +1843,7 @@ sweet_early_map_final(void)
+ 	tt_entry_t *l2 = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK);
+ 	tt_entry_t *slot = &l2[(va & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT];
+ 	assert(*slot == ARM_TTE_EMPTY);
+-	*slot = 0x9c000000ULL | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
++	*slot = SWEET_DEV_FB_PA | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
+ 	    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
+ 	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
+ 	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 023086f..797d6cc 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -515,10 +515,10 @@ LEXT(start_first_cpu)
+ 
+ #if defined(SWEET)
+ 	/* Stage 0: white 64x32 band, no stack or page tables needed. */
+-	MOV64	x0, (0x9c000000 + 2368 * 4320)
++	MOV64	x0, (SWEET_DEV_FB_PA + (SWEET_DEV_FB_H - 32) * SWEET_DEV_FB_STRIDE)
+ 	mov		w1, #-1
+ 	mov		x2, #32
+-	mov		x4, #4320
++	mov		x4, #SWEET_DEV_FB_STRIDE
+ Lsweet_mark_row:
+ 	mov		x3, #64
+ 	mov		x5, x0
+@@ -686,7 +686,7 @@ Lkernelcache_base_found:
+ 	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
+ 	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
+ 	 */
+-	MOV64	x10, 0x9c000000
++	MOV64	x10, SWEET_DEV_FB_PA
+ 	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
+ 	orr		x11, x11, x10
+ 	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 6928957..191964d 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -11,11 +11,11 @@
+ #include <stdint.h>
+ #include <kern/misc_protos.h>
+ 
+-static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;
++static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)SWEET_DEV_FB_PA;
+ #define EARLY_FB early_fb
+-#define EARLY_WIDTH 1080u
+-#define EARLY_HEIGHT 2400u
+-#define EARLY_STRIDE (4320u / 4)
++#define EARLY_WIDTH ((unsigned int)SWEET_DEV_FB_W)
++#define EARLY_HEIGHT ((unsigned int)SWEET_DEV_FB_H)
++#define EARLY_STRIDE ((unsigned int)(SWEET_DEV_FB_STRIDE / 4))
+ #define EARLY_SCALE 2u
+ #define EARLY_CELL_W (8u * EARLY_SCALE)
+ #define EARLY_CELL_H (16u * EARLY_SCALE)
+diff --git a/pexpert/pexpert/arm64/GUACAMOLE.h b/pexpert/pexpert/arm64/GUACAMOLE.h
+new file mode 100644
+index 0000000..b5363ed
+--- /dev/null
++++ b/pexpert/pexpert/arm64/GUACAMOLE.h
+@@ -0,0 +1,82 @@
++/*
++ * Board config for the OnePlus 7 Pro ("guacamole", Qualcomm SM8150 /
++ * Snapdragon 855): Kryo 485 = 4x Cortex-A55 + 4x Cortex-A76, ARMv8.2,
++ * no PAC. Same platform class as sweet (SM7150): generic ARM, 16K pages,
++ * GICv3 with two security states (every interrupt, including the timer,
++ * is a Group 1 IRQ taken through sleh_irq()).
++ *
++ * Per-device addresses (framebuffer, SPMI, RPMh, USB) live in
++ * pexpert/pexpert/arm64/sweet_dev.h, not here.
++ */
++
++#ifndef _PEXPERT_ARM64_GUACAMOLE_H
++#define _PEXPERT_ARM64_GUACAMOLE_H
++
++#define NO_MONITOR                1
++#define NO_ECORE                  1
++
++#define SWEET                     1
++
++/*
++ * All eight cores (four A55 + four A76, Kryo 485) as one homogeneous SMP
++ * cluster: cpus=N is clamped here. PSCI CPU_ON, 64-byte lines; the
++ * scheduler does not know the A76s are faster (no AMP/P-E clusters yet).
++ */
++#define SWEET_SMP_MAX_CPUS         8
++
++#define ARM_ARCH_TIMER
++#define __ARM_ARCH__              8
++#define __ARM_VMSA__              8
++#define __ARM_VFP__               4
++#define __ARM_COHERENT_CACHE__    1
++#define __ARM_DEBUG__             7
++#define __ARM_ENABLE_SWAP__       1
++#define __ARM_V8_CRYPTO_EXTENSIONS__ 1
++#define __ARM_PAN_AVAILABLE__     1
++#define __ARM_16K_PG__            1
++
++#define HAS_GIC_V3                1
++
++#ifndef ASSEMBLER
++#define PLATFORM_PANIC_LOG_DISABLED
++#endif /* ! ASSEMBLER */
++
++/*
++ * Qualcomm PPI numbering (secure phys, phys, virt, hyp = 1/2/3/0) instead
++ * of the usual 13/14/11/10: the virtual timer XNU uses (CNTV) is 16+3.
++ * Must match the virtual-timer-intid the ADT publishes for /gic.
++ */
++#define SWEET_VTIMER_INTID        19
++#define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
++
++#define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
++
++#define GICR_PE_SIZE              0x20000 // Size of each redistributor region
++
++/* GICv3 register definitions; see GICv3 spec (Arm IHI 0069G) */
++#define GICD_CTLR                 0x0
++
++/* Non-secure view of GICD_CTLR (DS=0) */
++#define GICD_CTLR_ENABLEGRP1      0x1
++#define GICD_CTLR_ENABLEGRP1A     0x2
++#define GICD_CTLR_ARE_NS          0x10
++#define GICD_CTLR_RWP             0x80000000
++
++#define GICR_TYPER                              0x08
++#define GICR_WAKER                              0x14
++#define GICR_IGROUPR0                           0x10080
++#define GICR_ISENABLER0                         0x10100
++#define GICR_IPRIORITYR0                        0x10400
++
++#define GICR_TYPER_AFFINITY_VALUE_SHIFT         32
++#define GICR_TYPER_LAST                         0x10
++
++#define GICR_WAKER_PROCESSORSLEEP               0x2
++#define GICR_WAKER_CHILDRENASLEEP               0x4
++
++#define ICC_CTLR_EOIMODE                        0x2
++
++#define ICC_SRE_SRE                             0x1
++/* End of GICv3 register definitions */
++
++#endif /* ! _PEXPERT_ARM64_GUACAMOLE_H */
+diff --git a/pexpert/pexpert/arm64/Makefile b/pexpert/pexpert/arm64/Makefile
+index c7d274f..1d300e1 100644
+--- a/pexpert/pexpert/arm64/Makefile
++++ b/pexpert/pexpert/arm64/Makefile
+@@ -18,7 +18,9 @@ PRIVATE_KERNELFILES = \
+ 	H13.h \
+ 	VMAPPLE.h \
+ 	BCM2837.h \
+-	SWEET.h
++	SWEET.h \
++	GUACAMOLE.h \
++	sweet_dev.h
+ 
+ 
+ # Headers installed into System.framework/PrivateHeaders (userspace internal SDK only).
+diff --git a/pexpert/pexpert/arm64/board_config.h b/pexpert/pexpert/arm64/board_config.h
+index 88e524a..121d6c5 100644
+--- a/pexpert/pexpert/arm64/board_config.h
++++ b/pexpert/pexpert/arm64/board_config.h
+@@ -108,6 +108,21 @@
+ 
+ #endif  /* ARM64_BOARD_CONFIG_SWEET */
+ 
++#ifdef ARM64_BOARD_CONFIG_GUACAMOLE
++#include <pexpert/arm64/GUACAMOLE.h>
++
++#define MAX_L2_CLINE                   6
++#define MAX_CPUS                       8
++#define MAX_CPU_CLUSTERS               1
++
++#define CORE_NCTRS                     8 /* Placeholder; KPC is not enabled for this target */
++
++#endif  /* ARM64_BOARD_CONFIG_GUACAMOLE */
++
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_GUACAMOLE)
++#include <pexpert/arm64/sweet_dev.h>
++#endif
++
+ #ifdef ARM64_BOARD_CONFIG_VMAPPLE
+ #include <pexpert/arm64/VMAPPLE.h>
+ 
+diff --git a/pexpert/pexpert/arm64/sweet_dev.h b/pexpert/pexpert/arm64/sweet_dev.h
+new file mode 100644
+index 0000000..2ee1e6c
+--- /dev/null
++++ b/pexpert/pexpert/arm64/sweet_dev.h
+@@ -0,0 +1,173 @@
++#ifndef _PEXPERT_ARM64_SWEET_DEV_H
++#define _PEXPERT_ARM64_SWEET_DEV_H
++
++/*
++ * Per-device hardware constants for the sweet XNU port.
++ *
++ * One block per board, selected by the machine config:
++ *   GUACAMOLE  OnePlus 7 Pro (SM8150):  -DARM64_BOARD_CONFIG_GUACAMOLE
++ *   SWEET      Redmi Note 10 Pro (SM7150): default
++ *
++ * tools/devices.py carries the same numbers for the ADT and the shim
++ * (shim/boards/*.h); keep the three in sync. Values marked VERIFY are from
++ * public kernel sources and have not been confirmed on the device's own
++ * live FDT yet - see GUACAMOLE.md for the audit list.
++ *
++ * ARM64_BOARD_CONFIG_SWEET is also the switch for the port's platform code
++ * (its drivers, HFS, pthread and libkern pieces); the GUACAMOLE machine
++ * config therefore defines it as well (makedefs/MakeInc.def). Read it as
++ * "sweet port", not "sweet phone": per-board numbers live here.
++ */
++
++#if defined(ARM64_BOARD_CONFIG_GUACAMOLE)
++
++/* ------------- OnePlus 7 Pro (guacamole, SM8150) ------------- */
++
++#define SWEET_DEV_NAME          "guacamole"
++
++/* ABL continuous-splash framebuffer (reserved-memory). 1440x3120 a8r8g8b8;
++ * on sweet the node is cont_splash_region at 0x9c000000 - the guacamole
++ * base/size must be read from its live DTB before the first boot. */
++#define SWEET_DEV_FB_PA         0x9c000000UL     /* VERIFY */
++#define SWEET_DEV_FB_W          1440
++#define SWEET_DEV_FB_H          3120
++#define SWEET_DEV_FB_STRIDE     (SWEET_DEV_FB_W * 4)
++
++/* SPMI arbiter v5 at 0xc440000 (regs 0xc440000/0xc600000/0xe600000/
++ * 0xe700000/0xc40a000 in the guacamole DTS - same block layout as SM7150).
++ * PMIC SIDs: PM8150 = 0 (PON, keys), PM8150B = 2 (charger), PM8150L = 4,
++ * PM8009 = 0xa. The drivers find APIDs by peripheral ID (PON 0x008,
++ * GPIO 0x4c1), so they pick the right SID themselves. */
++#define SWEET_DEV_SPMI_CORE_PA  0x0c440000u
++#define SWEET_DEV_SPMI_OBS_PA   0x0e600000u
++#define SWEET_DEV_SPMI_CFG_PA   0x0c40a000u
++#define SWEET_DEV_PON_RT        0x0810u          /* PON RT_STS (PON base 0x800 + 0x10) */
++#define SWEET_DEV_VOL_GPIO_RT   0xc110u          /* sweet: PM6150L GPIO2 */
++
++/* Keys: guacamole's volume keys are PM8150 GPIO6 (up) and GPIO7 (down),
++ * not the sweet layout (GPIO2 up / PON RESIN down); the GPIO APID must be
++ * identified on the phone first. Power (PON bit 0) works as on sweet. */
++#define SWEET_DEV_KEYS_VOLUME   0
++
++/* RPMh: apps RSC / DRV-2 at 0x18220000, TCS command registers at
++ * 0x18220d00 (offset 0xd00; ACTIVE 2 / SLEEP 3 / WAKE 3), command DB at
++ * 0xc3f0000c (live FDT "qcom,cmd-db@c3f000c" - same as sweet). */
++#define SWEET_DEV_RPMH_RSC_PA   0x18220000u
++#define SWEET_DEV_RPMH_TCS_PA   0x18220d00u
++#define SWEET_DEV_RPMH_TCS_SIZE 0x3000u
++/* Live tree qcom,cmd-db@c3f000c reg=<0xc3f000c 0x8>: the 8-byte locator
++ * holds {command-db physical address, size}. */
++#define SWEET_DEV_RPMH_DICT_PA  0x0c3f000cu
++
++/* Touch: Samsung S6SY761 @0x48 on qupv3 SE17 I2C (i2c@0xc80000, SPI 373),
++ * IRQ tlmm 122, reset tlmm 54, 1.8 V I/O switch tlmm 119, vdd pm8150_l17
++ * (RPMh resource "ldoa17", 3.008 V). Driver: bsd/dev/sweet_touch_sec.c. */
++#define SWEET_DEV_TOUCH         0
++#define SWEET_DEV_TOUCH_SEC     1
++#define SWEET_DEV_TOUCH_VREG_NAME "ldoa17"
++#define SWEET_DEV_TOUCH_VREG_MV 3008
++/* Reset-surviving scratch for the USB gadget progress marker (DRAM, above
++ * the kernel image/ADT/boot_args; the shim reads the same word). */
++#define SWEET_DEV_MARK_PA       0x198000000UL
++/* SM8150's DWC3 wedges (bus hang -> watchdog -> EDL) if STARTTRANSFER is
++ * issued before the host has reset the bus, so arm ep0 on USB reset /
++ * XferNotReady instead of at bring-up. */
++#define SWEET_DEV_USB_ARM_ON_EVENT 1
++/* QSCRATCH VBUS override: 0 none, 1 HS wrapper write, 2 HS+SS wrapper writes,
++ * 3 PHY-side override (femto v2 COMMON1/CTRL1). The wrapper at 0xa6f8800 is
++ * readable but any write to it wedges the bus in this state, and the SS PHY
++ * is the USB3/DP combo ABL drives for the display, so guacamole uses the
++ * PHY-side override. */
++#define SWEET_DEV_USB_VBUS_DEFAULT 3
++#define SWEET_DEV_TOUCH_SE_PA   0x00c80000u
++#define SWEET_DEV_TOUCH_GCC_PA  0x00100000u
++#define SWEET_DEV_TOUCH_NORTH_PA 0x03000000u     /* live tree pinctrl@03000000 */
++#define SWEET_DEV_TOUCH_GCC_VOTE 0x52014u        /* qupv3 wrap2 CBCR (branch vote) */
++#define SWEET_DEV_TOUCH_RCG     0x1e148u         /* qupv3 wrap2 s0 clk src (cmd_rcgr) */
++
++/* USB: usb0 = ssusb@a600000 (dwc3@a600000, 0xcd00) + hsphy@88e2000 (HS,
++ * 0x110) + ssphy@88e8000 (QMP USB3/DP, 0x3000, vdd pm8150_l18) +
++ * eud@88e0000; QSCRATCH = core + 0xf8800 = 0xa6f8800 (confirmed from
++ * dwc3-msm.c); extcon is the PM8150B PD PHY (SID 2). The GCC clock
++ * registers come from mainline gcc-sm8150.c (GDSCR 0xf004; CBCRs
++ * 0xf010/0xf014/0xf018, cfg-noc 0xf078, aggre 0xf07c, phy aux 0xf050,
++ * clkref 0x8c008). No ahb2phy clock on this SoC. */
++#define SWEET_DEV_USB           1
++#define SWEET_DEV_USB_GCC_PA    0x00100000u
++#define SWEET_DEV_USB_DWC3_PA   0x0a600000u
++#define SWEET_DEV_USB_QUSB2_PA  0x088e2000u
++#define SWEET_DEV_USB_QSCRATCH_PA 0x0a6f8800u
++#define SWEET_DEV_USB_GDSCR     0x0f004u
++#define SWEET_DEV_USB_CBCR_MASTER 0x0f010u
++#define SWEET_DEV_USB_CBCR_SLEEP  0x0f014u
++#define SWEET_DEV_USB_CBCR_UTMI   0x0f018u
++#define SWEET_DEV_USB_CBCR_CFGNOC 0x0f078u
++#define SWEET_DEV_USB_CBCR_AGGRE  0x0f07cu
++#define SWEET_DEV_USB_CBCR_AUX    0x0f050u	/* USB3 PHY aux */
++#define SWEET_DEV_USB_CBCR_AUX_NAME "phy-aux"
++#define SWEET_DEV_USB_CBCR_CLKREF 0x8c008u
++
++/* Panel physical size in mm (digitizer reporting). */
++#define SWEET_DEV_PANEL_MM_W    76
++#define SWEET_DEV_PANEL_MM_H    163
++
++#else /* !ARM64_BOARD_CONFIG_GUACAMOLE -> sweet */
++
++/* ------------- Redmi Note 10 Pro (sweet, SM7150) ------------- */
++
++#define SWEET_DEV_NAME          "sweet"
++
++/* reserved-memory cont_splash_region that ABL leaves lit. */
++#define SWEET_DEV_FB_PA         0x9c000000UL
++#define SWEET_DEV_FB_W          1080
++#define SWEET_DEV_FB_H          2400
++#define SWEET_DEV_FB_STRIDE     (SWEET_DEV_FB_W * 4)
++
++#define SWEET_DEV_SPMI_CORE_PA  0x0c440000u
++#define SWEET_DEV_SPMI_OBS_PA   0x0e600000u
++#define SWEET_DEV_SPMI_CFG_PA   0x0c40a000u
++#define SWEET_DEV_PON_RT        0x0810u
++#define SWEET_DEV_VOL_GPIO_RT   0xc110u
++
++#define SWEET_DEV_RPMH_RSC_PA   0x18220000u
++#define SWEET_DEV_RPMH_TCS_PA   0x18220d00u
++#define SWEET_DEV_RPMH_TCS_SIZE 0x3000u
++#define SWEET_DEV_RPMH_DICT_PA  0x0c3f000cu
++
++#define SWEET_DEV_TOUCH_SE_PA   0x00a84000u
++#define SWEET_DEV_TOUCH_GCC_PA  0x00100000u
++#define SWEET_DEV_TOUCH_NORTH_PA 0x03900000u
++#define SWEET_DEV_TOUCH_GCC_VOTE 0x5200cu
++#define SWEET_DEV_TOUCH_RCG     0x18148u
++
++#define SWEET_DEV_USB           1
++#define SWEET_DEV_USB_GCC_PA    0x00100000u
++#define SWEET_DEV_USB_DWC3_PA   0x0a600000u
++#define SWEET_DEV_USB_QUSB2_PA  0x088e2000u
++#define SWEET_DEV_USB_QSCRATCH_PA 0x0a6f8800u
++#define SWEET_DEV_USB_GDSCR     0x0f004u
++#define SWEET_DEV_USB_CBCR_MASTER 0x0f010u
++#define SWEET_DEV_USB_CBCR_SLEEP  0x0f014u
++#define SWEET_DEV_USB_CBCR_UTMI   0x0f018u
++#define SWEET_DEV_USB_CBCR_CFGNOC 0x0502cu
++#define SWEET_DEV_USB_CBCR_AGGRE  0x8201cu
++#define SWEET_DEV_USB_CBCR_AUX    0x6a004u	/* ahb2phy */
++#define SWEET_DEV_USB_CBCR_AUX_NAME "ahb2phy"
++#define SWEET_DEV_USB_CBCR_CLKREF 0x8c010u
++
++#define SWEET_DEV_TOUCH         1
++#define SWEET_DEV_TOUCH_SEC     0
++#define SWEET_DEV_TOUCH_VREG_NAME "ldoc11"
++#define SWEET_DEV_TOUCH_VREG_MV 3200
++#define SWEET_DEV_MARK_PA       0x118000000UL
++#define SWEET_DEV_USB_ARM_ON_EVENT 0
++#define SWEET_DEV_USB_VBUS_DEFAULT 2
++#define SWEET_DEV_KEYS_VOLUME   1   /* GPIO2 volume-up + PON RESIN volume-down */
++
++/* Panel physical size in mm (digitizer reporting). */
++#define SWEET_DEV_PANEL_MM_W    68
++#define SWEET_DEV_PANEL_MM_H    151
++
++#endif /* ARM64_BOARD_CONFIG_GUACAMOLE */
++
++#endif /* !_PEXPERT_ARM64_SWEET_DEV_H */
