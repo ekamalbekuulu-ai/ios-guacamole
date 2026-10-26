@@ -149,8 +149,12 @@ jobs:
       - name: 工具链
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            cpio android-sdk-mkbootimg python3
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu cpio python3
+          # ubuntu-22.04 的源里没有 android-sdk-mkbootimg，直接用 AOSP 的实现
+          git clone -q --depth 1 https://android.googlesource.com/platform/system/tools/mkbootimg /tmp/mkbootimg-src
+          printf '#!/bin/sh\nexec python3 /tmp/mkbootimg-src/mkbootimg.py "$@"\n' | sudo tee /usr/local/bin/mkbootimg >/dev/null
+          sudo chmod +x /usr/local/bin/mkbootimg
+          mkbootimg --help 2>&1 | head -5 || true
 
       - name: 找原厂 DTB
         run: |
@@ -208,6 +212,16 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+
+      - name: 腾磁盘（runner 默认只剩 13 G，这里要 30 G）
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost \
+                      /usr/share/swift /opt/hostedtoolcache/CodeQL /usr/lib/jvm /opt/microsoft 2>/dev/null || true
+          sudo apt-get clean
+          df -h /
+          AVAIL=$(df -P -k / | awk 'NR==2{print $4}')
+          if [ "$AVAIL" -lt 26000000 ]; then echo "::error::磁盘不足：只有 $((AVAIL/1024/1024)) GB 可用"; exit 1; fi
 
       - name: 依赖 + 编 apfs-fuse
         run: |
