@@ -148,7 +148,9 @@ jobs:
 
   # ---------------------------------------------------------------- ② shim-boot.img
   shim:
-    if: ${{ inputs.do_shim }}
+    # 编内核时等它成功；没编内核（skipped）时用仓库里最近的内核产物
+    needs: [kernel]
+    if: ${{ always() && inputs.do_shim && (needs.kernel.result == 'success' || needs.kernel.result == 'skipped') }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
