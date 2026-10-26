@@ -38,6 +38,18 @@ on:
         description: '调试：把内核文字留在屏幕上 + 下次启动打印上一次的日志环'
         type: string
         default: 'false'
+      cpus:
+        description: '启动几个核（1=保守 / 8=全开，快得多）'
+        type: string
+        default: '1'
+      extra_args:
+        description: '附加启动参数（如 sweetgpu=4）'
+        type: string
+        default: ''
+      variant:
+        description: '产物名字后缀（如 8core / 8core-gpu）'
+        type: string
+        default: 'std'
 
 permissions:
   contents: write   # 上传 Release 成品
@@ -232,26 +244,27 @@ jobs:
           echo "mkadt $ADT_ARGS"
           python3 tools/mkadt.py shim/out/guacamole.adt $ADT_ARGS
           ls -l shim/out/guacamole.adt
-          CMDLINE='debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetusb=0 sweettouchdelay=20 sweetfb_hz=30'
+          CMDLINE="debug=0xc serial=3 cpus=${{ inputs.cpus }} keepsyms=1 -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetusb=0 sweettouchdelay=20 sweetfb_hz=30"
           if [ "${{ inputs.console_debug }}" = "true" ]; then
-            # 调试版：不屏蔽控制台（文字一直画在屏幕上）+ 下次启动先打印上次的日志环
-            CMDLINE="$CMDLINE sweetlogdump=1"
+            CMDLINE="$CMDLINE sweetlogdump=1 -enable_kprintf_spam"
           else
             CMDLINE="$CMDLINE sweetfb_noconsole=1"
           fi
+          if [ -n "${{ inputs.extra_args }}" ]; then CMDLINE="$CMDLINE ${{ inputs.extra_args }}"; fi
           echo "CMDLINE=$CMDLINE"
           python3 tools/mkpayload.py "$K" shim/out/guacamole.adt shim/out/payload.bin --cmdline "$CMDLINE"
           ( cd shim && BOARD=guacamole DTB=../dtb/boot_unpacked/dtb bash ./build.sh ../shim/out/payload.bin )
-          cp shim/out/shim-boot.img shim-boot.img
-          sha256sum shim-boot.img | tee shim-boot.img.sha256
-          ls -l shim-boot.img
+          V="${{ inputs.variant }}"
+          cp shim/out/shim-boot.img "shim-boot-$V.img"
+          sha256sum "shim-boot-$V.img" | tee "shim-boot-$V.img.sha256"
+          ls -l "shim-boot-$V.img"
 
       - uses: actions/upload-artifact@v4
         with:
           name: shim-boot
           path: |
-            shim-boot.img
-            shim-boot.img.sha256
+            shim-boot-*.img
+            shim-boot-*.img.sha256
 
       - name: 传到 Release（29 MB，方便直接下）
         env:
@@ -261,7 +274,7 @@ jobs:
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --title "OnePlus 7 Pro (guacamole) iOS 16.7.16" \
               --notes "shim-boot.img = 启动镜像（内核+设备树+启动参数）；ios16-root.simg.part-* = iOS 根镜像分卷，按文件名顺序 cat 合并。"
-          gh release upload "$RELEASE_TAG" shim-boot.img shim-boot.img.sha256 --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$RELEASE_TAG" "shim-boot-${{ inputs.variant }}.img" "shim-boot-${{ inputs.variant }}.img.sha256" --repo "$GITHUB_REPOSITORY" --clobber
 
   # ---------------------------------------------------------------- ③ iOS 根镜像
   root:
