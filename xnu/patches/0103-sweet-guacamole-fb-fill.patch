@@ -1,7 +1,13 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -69,6 +69,14 @@
+@@ -1,4 +1,4 @@
+-/*
++﻿/*
+  * Built-in IOMobileFramebuffer for SWEET: the ABL's continuous-splash
+  * framebuffer (1080x2400 a8r8g8b8 in RAM, the panel scans it out by
+  * itself) as the main display, driven by CoreAnimation's CPU renderer.
+@@ -69,6 +69,16 @@
  #define SWEET_FB_NOTIFY_TYPES           8
  #define SWEET_FB_NOTIFY_VSYNC           5
  #define SWEET_FB_VSYNC_US               16667
@@ -13,10 +19,12 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 + * (which is what the UIKit asset lookup needs).
 + */
 +static int sweet_fb_fill;
++#define SWEET_FB_MAX_W                  2048
++static uint16_t sweet_fb_xmap[SWEET_FB_MAX_W];   /* fill mode: dest x -> src column */
  #define SWEET_FB_DOT_PITCH              458     /* ppi, as the iPhone X panel */
  /*
   * The iOS userland only has status bar / layout data for real iPhone
-@@ -183,6 +191,17 @@
+@@ -183,6 +193,17 @@
  	}
  	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
  	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
@@ -34,7 +42,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  	fLock = IOLockAlloc();
  	fClients = OSArray::withCapacity(4);
  	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
-@@ -398,10 +417,44 @@
+@@ -398,10 +419,55 @@
  			src = 0;
  		}
  		if (src != 0 && bpe == 4) {
@@ -61,17 +69,28 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +				if (dh > (int32_t)fHeight - py) {
 +					dh = (int32_t)fHeight - py;
 +				}
++				if (dw > SWEET_FB_MAX_W) {
++					dw = SWEET_FB_MAX_W;
++				}
++				if (dw > 0 && dh > 0) {
++					for (int32_t x = 0; x < dw; x++) {
++						sweet_fb_xmap[x] = (uint16_t)(((uint64_t)x * (uint64_t)w) / (uint64_t)dw);
++					}
++				}
 +				for (int32_t y = 0; y < dh; y++) {
 +					int32_t yy = sy + (int32_t)(((int64_t)y * h) / dh);
 +					/* fPixels and src hold integer addresses, not pointers. */
-+					uint8_t *drow = (uint8_t *)(uintptr_t)(fPixels +
++					uint32_t *d32 = (uint32_t *)(uintptr_t)(fPixels +
 +					    (uint64_t)(py + y) * fRowBytes + (uint64_t)px * 4);
-+					const uint8_t *srow = (const uint8_t *)(uintptr_t)(src + s->offset +
++					const uint32_t *s32 = (const uint32_t *)(uintptr_t)(src + s->offset +
 +					    (uint64_t)yy * s->bytesPerRow + (uint64_t)sx * 4);
++					/*
++					 * Column map is precomputed per call (dw divides
++					 * are far too slow in the per-pixel loop: 1.28x of
++					 * 1440x3120 at 30 Hz would be ~135 M divisions/s).
++					 */
 +					for (int32_t x = 0; x < dw; x++) {
-+						int32_t xx = (int32_t)(((int64_t)x * w) / dw);
-+						*(uint32_t *)(drow + (uint64_t)x * 4) =
-+						    *(const uint32_t *)(srow + (uint64_t)xx * 4);
++						d32[x] = s32[sweet_fb_xmap[x]];
 +					}
 +				}
 +			} else {
