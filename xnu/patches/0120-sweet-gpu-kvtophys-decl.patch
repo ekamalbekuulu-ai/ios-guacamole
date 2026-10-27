@@ -1,0 +1,14 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -47,6 +47,10 @@
+ #include <vm/vm_kern.h>
+ #include "sweet_gpu_tables.h"
+ #include "zap_image.h"
++
++/* The passthrough the K90/HackiOS driver declares for itself (adreno8_private.h):
++ * vm/pmap.h does not export kvtophys to bsd/dev code. */
++extern uint64_t kvtophys(vm_offset_t va);
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_rpmh_arc_dump(void);
