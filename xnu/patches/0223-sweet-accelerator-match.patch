@@ -1,0 +1,17 @@
+sweet-accelerator: register the service in the IOKit match table
+
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -82,6 +82,11 @@ const char * gIOKernelConfigTables =
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = SweetBattery;"
+     "   },"
++    "{"
++    "     'IOClass'         = SweetAccelerator;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = SweetAccelerator;"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"
