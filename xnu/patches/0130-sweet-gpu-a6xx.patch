@@ -1951,7 +1951,7 @@ diff --git a/bsd/dev/sweet_accel_client.cpp b/bsd/dev/sweet_accel_client.cpp
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_accel_client.cpp
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,268 @@
 +﻿/*
 + * SweetAccelerator user client: the door Metal talks through.
 + *
@@ -1980,6 +1980,7 @@ new file mode 100644
 +#include <IOKit/IOLib.h>
 +#include <IOKit/IOMemoryDescriptor.h>
 +#include <vm/pmap.h>
++#include "SweetSurface.h"
 +
 +extern "C" {
 +int sweet_a6xx_bo_alloc(uint64_t size, uint64_t *h, uint64_t *gpu_va, uint64_t *sz);
@@ -2096,8 +2097,40 @@ new file mode 100644
 +		}
 +		return sweet_a6xx_bo_free(args->scalarInput[0]) ? kIOReturnNotFound : kIOReturnSuccess;
 +
-+	case 3:		/* import an IOSurface: implemented with the bundle work */
-+		return kIOReturnUnsupported;
++	case 3: {
++		if (args->scalarInputCount < 1 || args->scalarOutputCount < 3) {
++			return kIOReturnBadArgument;
++		}
++		uint32_t sid = (uint32_t)args->scalarInput[0];
++		SweetSurface *s = sweet_surface_copy(sid);
++		if (s == NULL) {
++			return kIOReturnNotFound;
++		}
++		static uint64_t pages[1024];
++		uint32_t n = 0;
++		IOByteCount seg = 1;
++		for (off_t off = 0; off < (off_t)s->allocSize && n < 1024 && seg; off += seg) {
++			seg = 0;
++			addr64_t pa = s->memory ? s->memory->getPhysicalSegment(off, &seg, kIODirectionInOut) : 0;
++			if (pa == 0 || seg == 0) {
++				break;
++			}
++			for (IOByteCount k = 0; k < seg && n < 1024; k += PAGE_SIZE) {
++				pages[n++] = pa + k;
++			}
++		}
++		uint64_t gva = 0, sz = 0;
++		int rc = n ? sweet_a6xx_surface_import_pages(sid, pages, n, &gva, &sz) : -1;
++		s->release();
++		if (rc) {
++			return kIOReturnError;
++		}
++		args->scalarOutput[0] = (uint64_t)sid;
++		args->scalarOutput[1] = gva;
++		args->scalarOutput[2] = sz;
++		args->scalarOutputCount = 3;
++		return kIOReturnSuccess;
++	}
 +
 +	case 4: {	/* submit and wait */
 +		if (args->scalarInputCount < 3 || args->scalarOutputCount < 1) {
@@ -2183,6 +2216,8 @@ new file mode 100644
 +}
 +
 +#endif /* ARM64_BOARD_CONFIG_GUACAMOLE */
++
++
 +
 +
 diff --git a/bsd/conf/files b/bsd/conf/files
