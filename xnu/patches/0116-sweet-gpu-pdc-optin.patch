@@ -1,0 +1,38 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -790,6 +790,23 @@
+ 	printf("SWEET GPU: pdc seq0 now=%#x\n", gpu_rd(seq, 0x0u));
+ 	if (step < 6) {
+ 		return rscc;
++	}
++
++	/*
++	 * Step 6 is the only thing measured to wedge the SoC: rpmh=4 (RSC uCode)
++	 * and rpmh=5 (plus the PDC sequencer uCode) both survive, while rpmh=6 -
++	 * this step, the PDC TCS tables plus PDC_ENABLE - lands in EDL every
++	 * time. Enabling the PDC makes it start driving GPU power sequences
++	 * through RPMh, which the hardware refuses while the GMU is still in
++	 * reset, so it stays off until the GMU has actually booted.
++	 */
++	{
++		int want_pdc = 0;
++		(void)PE_parse_boot_argn("sweetgpu_pdc", &want_pdc, sizeof(want_pdc));
++		if (!want_pdc) {
++			printf("SWEET GPU: pdc TCS/enable skipped (sweetgpu_pdc=0)\n");
++			return rscc;
++		}
+ 	}
+ 
+ 	/* Step 6: PDC TCS command tables (a640: third command address 0x30090)
+@@ -1108,6 +1125,10 @@
+ 		}
+ 		delay(1);
+ 	}
++	printf("SWEET GPU: CM3 init=%#x hfi=%#x -> %s\n",
++	    gpu_rd(gmu, GMU_CM3_FW_INIT_RESULT), gpu_rd(gmu, GMU_HFI_CTRL_STATUS),
++	    (gpu_rd(gmu, GMU_CM3_FW_INIT_RESULT) == 0xbabefaceu) ? "BOOTED"
++	    : "not booted");
+ 	printf("SWEET GPU: gmu boot last=%#x want=%#x/%#x init=%#x %s\n",
+ 	    last, reset, mask, init, init_ok ? "ok" : "timeout");
+ 	/*
