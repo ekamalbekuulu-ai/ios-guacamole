@@ -30,7 +30,7 @@ jobs:
           rm -rf "$B"; mkdir -p "$B"
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           xcrun --sdk iphoneos clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
-            -O2 -fobjc-arc -bundle -fembed-bitcode-marker \
+            -O2 -fobjc-arc -bundle \
             -o "$B/SweetMetal" \
             phone/metal/SweetMetal.m phone/metal/a6draw.m phone/metal/mtlk.c phone/metal/sweetgpu.c \
             -framework Foundation -framework Metal -framework IOSurface -framework IOKit
