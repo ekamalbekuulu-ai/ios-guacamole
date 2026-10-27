@@ -72,13 +72,10 @@ static void gpu_run(void (*save)(const char *), int gmu_cb);
 
 void gpuprobe_run(void (*save)(const char *))
 {
-	/* Self-documenting: these are the board constants this probe runs with, so
-	 * the saved log proves which values were actually used on this device. */
-	log_printf("gpu: board guacamole chip 0x6040001 gpu %lx gpucc %lx smmu %lx gmu %lx\n",
-		   (uint64_t)GPU, (uint64_t)GPUCC, (uint64_t)SMMU, (uint64_t)GMU_REG(0));
-	log_printf("gpu: board pool %lx zap %lx/%lx fb %lx stride %x %dx%d\n",
-		   (uint64_t)GMEM, (uint64_t)ZAP_REGION, (uint64_t)ZAP_SIZE, (uint64_t)FB_PA,
-		   FB_STRIDE, FB_W, BAND_Y + BAND_H);
+	/* Self-documenting: the board constants this probe runs with, so the saved
+	 * log proves which values were actually used on this device. */
+	log_printf("gpu: board guacamole chipid 0x6040001 gpu %lx gpucc %lx smmu %lx\n",
+		   (uint64_t)GPU, (uint64_t)GPUCC, (uint64_t)SMMU);
 	log_printf("gpu: before cx_gdsc %x gx_gdsc %x gmu_rcg %x/%x ahb %x cxo %x cx_gmu %x\n",
 		   rd32(GPUCC + GPUCC_CX_GDSCR), rd32(GPUCC + GPUCC_GX_GDSCR),
 		   rd32(GPUCC + GPUCC_GMU_RCG), rd32(GPUCC + GPUCC_GMU_RCG + 4),
@@ -751,6 +748,9 @@ static void copy_in(uintptr_t dst, const uint8_t *src, uint32_t len)
 static void zap_load(void (*save)(const char *))
 {
 	uint64_t r1 = 0;
+	log_printf("zap: board region %lx size %lx metadata %lx (%u bytes)\n",
+		   (uint64_t)ZAP_REGION, (uint64_t)ZAP_SIZE, (uint64_t)ZAP_META,
+		   (uint32_t)(zap_mdt_end - zap_mdt));
 	int64_t rc = scm(7, 1, PAS_GPU, 0, 0, &r1);		/* PAS_IS_SUPPORTED */
 	log_printf("zap: pas supported(13) rc %ld r1 %lx\n", (long)rc, r1);
 	save("zap: pas supported");
@@ -884,6 +884,8 @@ static void gpu_paint(void (*save)(const char *), uintptr_t c)
 	}
 	pkt7(0x26, 0);
 	flush_wait("paint done");
+	log_printf("gpu: fb pa %lx stride %x width %d band y %d + %d rows\n",
+		   (uint64_t)FB_PA, FB_STRIDE, FB_W, BAND_Y, BAND_H);
 	log_printf("gpu: painted %d rows of %d px at y %d; fb word %x\n", BAND_H, FB_W,
 		   BAND_Y, rd32(FB_PA + (BAND_Y + BAND_H / 2) * FB_STRIDE + (FB_W / 2) * 4));
 	save("gpu: painted");
