@@ -1,4 +1,4 @@
-# iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
+﻿# iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 ## Session handoff 2026-10-28 (guacamole, a640 driver in the kernel)
 
@@ -347,7 +347,7 @@ before flashing), then `fastboot boot` and photograph the panel.
 ### 2026-10-20 (later): Setup-intact root image, ADT --dump trap, display geometry
 - **Setup image built and flashed.** `iosroot-build/build-root-setup.sh` copies the iOS 16.7.16
   root (16 GiB raw HFSX, 12 GiB used) and `tools/sweet-root-tweaks.py --keep-setup` applies the
-  usual tweaks *without* the purplebuddy SetupDone prefs (launchd 7 × `_PanicOnCrash` renamed,
+  usual tweaks *without* the purplebuddy SetupDone prefs (launchd 7 脳 `_PanicOnCrash` renamed,
   2 CommCenter jobs removed, `/private/var/containers` created, VirtualAudio off, MediaToolbox
   recorder off, migration/springboard prefs). The fresh image has no mobileactivationd system
   container, so the data-ark step is skipped (`warning: ... skipped data ark`) - activation still
@@ -416,7 +416,7 @@ before flashing), then `fastboot boot` and photograph the panel.
 - Payloads rebuilt with the corrected ADT + `/product`: `/tmp/opencode/img-t26.img` (console +
   `sweetlogdump=1`) and `img-t27.img` (noconsole, `sweetfb_hz=30`). Booting t26 on the Setup image
   reached the **real Setup wizard**: Hello -> language -> region -> "App & Data" with all five
-  choices rendered by SpringBoard (touch works). Tapping "不传输 App 与数据" then hangs on an
+  choices rendered by SpringBoard (touch works). Tapping "涓嶄紶杈?App 涓庢暟鎹? then hangs on an
   unlabelled spinner, so the wizard was not completed; the Setup image is still on the phone's
   userdata partition unless the skip image was re-flashed.
 - **2026-10-20 evening: the skip-setup image boots to a usable home screen.** Confirmed on the
@@ -438,7 +438,7 @@ before flashing), then `fastboot boot` and photograph the panel.
   sweet_dev.h), arch filter (`MakeInc.def` must keep GUACAMOLE on plain arm64, not arm64e),
   build glue (`bsd/conf`, `libkern/conf` Makefile.template gated on `SWEET`), and the
   platform/CPU IONameMatch. Artifact: `kernel.development.guacamole` (run 39205264491,
-  SHA256 afb6d16e…), 17 MB.
+  SHA256 afb6d16e鈥?, 17 MB.
 - **Boot 1** (no rd=): `panic: Unable to find driver for this platform` - KernelConfigTables
   matched 'xiaomi,sweet' / 'qcom,kryo470'; the guacamole ADT carries 'oneplus,guacamole' /
   'qcom,kryo485'. Fixed board-aware in patch 0082.
@@ -579,7 +579,7 @@ before flashing), then `fastboot boot` and photograph the panel.
   `graphics-featureset-class = APPLE4`, so the window server takes the Metal/AGX path, which this
   port cannot render yet - the screen goes to garbage/letterbox. Reverted: keep the product node
   out until a software/CoreGraphics path is forced (see the CA_* knobs in the notes above).
-- **🎉 TOUCH WORKS ON GUACAMOLE (2026-10-19 ~23:25 local, image t10).** Coordinates appear
+- **馃帀 TOUCH WORKS ON GUACAMOLE (2026-10-19 ~23:25 local, image t10).** Coordinates appear
   on screen when touching (`SWEET TOUCH: f0 down x,y` / `f0 up`), so the full chain is up:
   TLMM tile addressing -> pin config (reset 54, 1.8 V enable 119, IRQ 122, bus 55/56) ->
   RPMh ldoa17 3008 mV -> vendor reset timing -> boot-complete event -> DEVICE_ID "671" ->
@@ -712,16 +712,16 @@ before flashing), then `fastboot boot` and photograph the panel.
 
 **LIVE LOG over USB (0077, boot 0077s): no more recovery round-trips.** Boot an image with `sweetusb=2`, run `tools/sweet-usbnet.sh logs/live-NAME.txt` on the PC: it waits for the phone's CDC-ECM interface, sets 192.168.7.1/24 (sudo) and prints/saves the kernel console the phone streams every 100 ms as UDP to 192.168.7.1:5140 (starts with the last 64 KiB). `ping 192.168.7.2` checks the link. Current image: `shim/out/shim-boot-0077s.img` (kernel 0077, ADT sweet-0069hi, cpus=6, sweetfb_noconsole=1, sweetfb_hz=30, sweetusb=2). The recovery pull (`tools/sweet-log-pull.sh`) is still the way after a panic/hang before USB comes up.
 
-**🎉 USB networking works (boot 0076s, 18:24 local): `ping 192.168.7.2` from the PC answers in ~1 ms, 0 % loss (200-packet burst, 1500-byte frames, 512/1024-byte frames).** 0075: CDC-ECM function (bulk 0x81/0x01, interrupt 0x82 NETWORK_CONNECTION; host MAC 02:00:5e:77:ee:01) + kernel ethernet ifnet `ue0` (legacy output, header strip like if_fake) with 192.168.7.2/24 set from the kernel (proto_plumb + SIOCAIFADDR on an in-kernel socket). 0076: received frames into one cluster mbuf (mbuf_allocpacket gave a first mbuf of length 0 -> panic "Failed mbuf validity check: len -14"). Host side (Linux cdc_ether, interface `enp0s20f0u3u1`): `nmcli dev set IF managed no; sudo ip addr add 192.168.7.1/24 dev IF; sudo ip link set IF up`. Boot image `shim/out/shim-boot-0076s.img` (`sweetusb=2`). iOS itself does not see ue0 yet (configd needs an IONetworkInterface in IOKit).
+**馃帀 USB networking works (boot 0076s, 18:24 local): `ping 192.168.7.2` from the PC answers in ~1 ms, 0 % loss (200-packet burst, 1500-byte frames, 512/1024-byte frames).** 0075: CDC-ECM function (bulk 0x81/0x01, interrupt 0x82 NETWORK_CONNECTION; host MAC 02:00:5e:77:ee:01) + kernel ethernet ifnet `ue0` (legacy output, header strip like if_fake) with 192.168.7.2/24 set from the kernel (proto_plumb + SIOCAIFADDR on an in-kernel socket). 0076: received frames into one cluster mbuf (mbuf_allocpacket gave a first mbuf of length 0 -> panic "Failed mbuf validity check: len -14"). Host side (Linux cdc_ether, interface `enp0s20f0u3u1`): `nmcli dev set IF managed no; sudo ip addr add 192.168.7.1/24 dev IF; sudo ip link set IF up`. Boot image `shim/out/shim-boot-0076s.img` (`sweetusb=2`). iOS itself does not see ue0 yet (configd needs an IONetworkInterface in IOKit).
 
 **USB device mode works (boot 0074s, 17:45 local): the host enumerates the phone at high speed as `1209:0001 ios-sweet "Sweet iOS (USB bring-up)"`.** 0072 read-only probe: ABL leaves the USB30_PRIM GDSC and all 7 USB clocks on, DWC3 v3.20a (GSNPSID 0x5533320a) in device mode (GCTL 0x00112000), halted (DCTL RUN_STOP 0, DSTS 0x00d3de04), event buffer still at ABL's 0xfdfc8000, QUSB2 PHY alive. 0073 (`sweetusb=2`): DCTL soft reset, own event buffer (polled, interrupt masked), ep0 DEPSTARTCFG/SETEPCONFIG/SETTRANSFRESOURCE, setup TRB, RUN_STOP; control-transfer state machine as Linux ep0.c; descriptors: vendor class, no data endpoints. It ran but no event came: **0074** forces the VBUS session in the Qualcomm wrapper (QSCRATCH 0xa6f8800: HS_PHY_CTRL |= UTMI_OTG_VBUS_VALID(20)|SW_SESSVLD_SEL(28), SS_PHY_CTRL |= LANE0_PWR_PRESENT(24), as Linux dwc3_qcom_vbus_override_enable) -> connect + enumeration. Image `shim/out/shim-boot-0074s.img`. Black Phone app: main thread waits in -[VMVoicemailManager fetchAccounts] (sync XPC; voicemail needs the modem).
 
 **Navigation works (boot 0071s on v14, log `logs/boot-0071s.txt`):** swipe up from the bottom edge returns to the home screen; app switcher works. Two fixes: **0070** pid_hibernate (syscall 435 was nosys on the macOS config -> SIGSYS killed SpringBoard in -[SBToAppsWorkspaceTransaction _didComplete] when an app left the foreground; the only CONFIG_EMBEDDED-only entry in syscalls.master); **0071** touches starting within 48 px of an edge carry kIOHIDDigitizerEventFromEdgeTip (UIKit `_UIEventHIDTouchEdgeTypeForHIDEvent` reads the digitizer EventMask 0xb0007 bits 0x800/0x1000/0x2000/0x40000). Diagnosed, not fixed: Settings (Preferences) SIGTRAP in PodcastsUI func_1cdc47c58: force-unwrap of `URL.volumeTotalCapacity` (nil on our HFS+ root). Phone/Photos/Messages show black (MobilePhone launches, no crash) - next: stack samples via boot-arg `sweetsample=MobilePhone,MobileSlideShow,MobileSMS,SpringBoard` (image `shim/out/shim-boot-0071s.img`).
 
-**🎉🎉 MILESTONE 2026-10-18 ~15:30 local: iOS 16.7 SPRINGBOARD HOME SCREEN ON THE PHONE** (boot `shim/out/shim-boot-0069s.img` = kernel 0069 + ADT `shim/out/sweet-0069hi.adt`, image **v14**; log `logs/boot-0069s-v14-HOMESCREEN.txt`). Home screen with a few apps, Settings opens, Control Center / lock screen / notification center work, touch + buttons work, 6 A55 cores (`cpus=6`), `sweetfb_noconsole=1 sweetfb_hz=30`. Known issue: cannot leave Settings (home gesture / AssistiveTouch home do nothing) - to investigate.
+**馃帀馃帀 MILESTONE 2026-10-18 ~15:30 local: iOS 16.7 SPRINGBOARD HOME SCREEN ON THE PHONE** (boot `shim/out/shim-boot-0069s.img` = kernel 0069 + ADT `shim/out/sweet-0069hi.adt`, image **v14**; log `logs/boot-0069s-v14-HOMESCREEN.txt`). Home screen with a few apps, Settings opens, Control Center / lock screen / notification center work, touch + buttons work, 6 A55 cores (`cpus=6`), `sweetfb_noconsole=1 sweetfb_hz=30`. Known issue: cannot leave Settings (home gesture / AssistiveTouch home do nothing) - to investigate.
 What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user client), 0059 iPhone X identity (hw.product etc.), 0060 SPMI keys + GENI touch, 0061 1125x2436 presented display, 0062 RPMh L11C touch power + IOPMPowerSource battery, 0063 GENI FIFO packing (Goodix GT9896), 0064 PRIV_WORK_INTERVAL grant (SpringBoard "Failed to create work interval"), 0065 SMP via PSCI (6 A55), 0066 crash map regions, 0067 console mute without cons_ops write, 0068 IOSurface lookup of an already-mapped surface returns base -1 (backboardd snapshot crash), 0069 UFS log flush 10 s. Image v13: CommCenter removed from launchd.plist, BKNoWatchdogs. **Image v14** = v13 + Setup skipped (`/var/mobile/Library/Preferences/com.apple.purplebuddy.plist` SetupDone/SetupFinishedAllSteps true, SetupVersion 11, daemonizeNeedsToRun false; purplebuddy.notbackedup mini-buddy flags false; managedconfiguration.notbackedup LockdownActivationIndicatesCloudConfigurationAvailable false; springboard MCForceShowCloudConfigurationUI false) + mobileactivationd data ark seeded (`/private/var/containers/Data/System/D90C94C4-F94E-4FCF-8A28-A93BE3846D8E/Library/internal/data_ark.plist`, -ActivationState Activated etc.) + MediaToolbox D22/D221/Default SubServerConfiguration StartRecorderServer=false (mediaserverd crash loop: portrait-filter prewarm called NULL GL). **Activation:** ADT /chosen certificate-production-status 0, effective-production-status-ap 0, certificate-security-mode 1, effective-security-mode-sep 1 -> mobileactivationd's native Hactivation branch (Codex `codex/activation/report.md`; alternative 4-byte daemon patch documented there). Fallback image v13; v12 deleted.
 
-**🎉 TOUCH WORKS (boot 0063u on image v13, 2026-10-18 ~13:15 local):** tapping (i) on Setup's Hello opens the device-info sheet; swipe-up is recognised (spinner, then back to Hello - under investigation). Chain: RPMh L11C vote (0062, `bsd/dev/sweet_rpmh.c`) -> GT9896 @0x5d on GENI SE7 (0063 fixed FIFO packing: register address went out byte-swapped) -> sweet_hid_touch -> SweetHIDTouch -> backboardd. Battery icon OK (0062 SweetBattery IOPMPowerSource, static 100 %). **Image v13** (= v12 + CommCenter jobs removed from launchd.plist + `BKNoWatchdogs`=true and `FBLaunchWatchdogExceptions{com.apple.purplebuddy:100}` in /var/mobile/Library/Preferences/com.apple.springboard.plist): Setup no longer killed by the scene-create watchdog (it blocked in CoreTelephony getSubscriptionInfo -> CommCenter, Codex `codex/setup/report.md`; that report also lists how to skip Setup: SetupDone/SetupFinishedAllSteps/SetupVersion=11 in com.apple.purplebuddy.plist + activation check). v9 deleted, fallback = v12. Input latency ~1 min with 1 CPU -> Codex task 11 = SMP via PSCI (`codex/smp/`).
+**馃帀 TOUCH WORKS (boot 0063u on image v13, 2026-10-18 ~13:15 local):** tapping (i) on Setup's Hello opens the device-info sheet; swipe-up is recognised (spinner, then back to Hello - under investigation). Chain: RPMh L11C vote (0062, `bsd/dev/sweet_rpmh.c`) -> GT9896 @0x5d on GENI SE7 (0063 fixed FIFO packing: register address went out byte-swapped) -> sweet_hid_touch -> SweetHIDTouch -> backboardd. Battery icon OK (0062 SweetBattery IOPMPowerSource, static 100 %). **Image v13** (= v12 + CommCenter jobs removed from launchd.plist + `BKNoWatchdogs`=true and `FBLaunchWatchdogExceptions{com.apple.purplebuddy:100}` in /var/mobile/Library/Preferences/com.apple.springboard.plist): Setup no longer killed by the scene-create watchdog (it blocked in CoreTelephony getSubscriptionInfo -> CommCenter, Codex `codex/setup/report.md`; that report also lists how to skip Setup: SetupDone/SetupFinishedAllSteps/SetupVersion=11 in com.apple.purplebuddy.plist + activation check). v9 deleted, fallback = v12. Input latency ~1 min with 1 CPU -> Codex task 11 = SMP via PSCI (`codex/smp/`).
 
 **INPUT WORKS (boot 0060u on a freshly flashed v12, log `logs/boot-0060u.txt`):** power, volume up, volume down reach iOS (PMIC -> sweet_keys.c -> SweetHIDButtons -> backboardd). Power locks/unlocks (screen "off" shows the kernel console because the panel never really turns off). **Device identity fixed: iPhone X** (home indicator, Face-ID-style Setup). Earlier test (0059u, `sweethidtest=15` fake Home presses) advanced Setup from Hello to the language list.
 - **0058** HID: `iokit/Kernel/arm/hid/`: IOHIDEventServiceUserClient + IOHIDEventServiceQueue + IOHIDEvent compiled UNCHANGED from Apple IOHIDFamily-1915.140.3 (= exact version of the iOS 16.7 IOHIDLib, clone in `research/iohid-1915`) over our minimal IOHIDEventService (SweetHID.cpp: SweetHIDButtons consumer page 0x0C power 0x30 / vol 0xE9/0xEA / menu 0x40; SweetHIDTouch digitizer collections). C hooks `sweet_hid_key(key, down)` (0 power, 1 vol+, 2 vol-, 3 home) and `sweet_hid_touch(finger, down, x, y)`. HID logs go to IOLog. Boot-arg `sweethidtest=N` = fake Home press every N s.
@@ -763,7 +763,7 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
 4. Apply Codex 0058 (UFS speed), consider cpus>1, check whether installcoordinationd/mediaserverd loops are gone, analyse mobileactivationd.
 5. Hide kernel console over the GUI when not debugging: boot-arg sweetfb_noconsole=1 (but then panics are not on screen).
 
-- **🎉 MILESTONE: iOS GUI ON THE PHONE - Setup.app "Hello" screen (2026-10-17 ~21:30 UTC, boot 0057u on image v12).** Photo: `/run/media/dipa/android/ios-sweet-work/MILESTONE-setup-hello-2026-10-17.jpg` (animated "dobar d(an)" hello lettering, status bar "iPod" + battery icon, bottom "Pritisnite Home za otvaranje" = "Press Home to open" (locale hr), (i) button). Rendered by iOS 16.7 SpringBoard/Setup through CoreAnimation -> backboardd -> kernel IOSurface (IOCoreSurfaceRoot) -> kernel AppleCLCD swaps -> ABL panel memory. What made it: data migration finally skipped (v12: `LastSystemVersion` 20H392 in the plain `/var/mobile/Library/Preferences/com.apple.migration.plist`; ADT `/chosen/unique-chip-id` + `chip-id` for IOPlatformUUID), 0057 (no ext resolver -> ACL containers work), plus everything before (0046 display/IOSurface, 0050 Sandbox policy, display-scale 3, containers dirs, RENAME_SWAP, AKS 35/101, 10 Hz present).
+- **馃帀 MILESTONE: iOS GUI ON THE PHONE - Setup.app "Hello" screen (2026-10-17 ~21:30 UTC, boot 0057u on image v12).** Photo: `/run/media/dipa/android/ios-sweet-work/MILESTONE-setup-hello-2026-10-17.jpg` (animated "dobar d(an)" hello lettering, status bar "iPod" + battery icon, bottom "Pritisnite Home za otvaranje" = "Press Home to open" (locale hr), (i) button). Rendered by iOS 16.7 SpringBoard/Setup through CoreAnimation -> backboardd -> kernel IOSurface (IOCoreSurfaceRoot) -> kernel AppleCLCD swaps -> ABL panel memory. What made it: data migration finally skipped (v12: `LastSystemVersion` 20H392 in the plain `/var/mobile/Library/Preferences/com.apple.migration.plist`; ADT `/chosen/unique-chip-id` + `chip-id` for IOPlatformUUID), 0057 (no ext resolver -> ACL containers work), plus everything before (0046 display/IOSurface, 0050 Sandbox policy, display-scale 3, containers dirs, RENAME_SWAP, AKS 35/101, 10 Hz present).
   **Missing (next work, in rough order):**
   - **Input: no touch, no power button, no volume buttons** (no HID drivers; backboardd looks for IOHIDDevice / HIDServiceSupport services). Setup is stuck on "Hello".
   - **Device identity: it thinks it is an iPod with a Home button** (status bar "iPod", "Press Home to open"): MobileGestalt has no product/model identity (no /product node, product-type, etc.) - give it iPhone10,3 / home-button-less (Face ID class) identity.
@@ -878,7 +878,7 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
 - **DECIDED (user, 2026-10-15): 64 GiB `iosroot` on LUN0 (sda), taken from userdata (wipes Android user data; Android/super kept).** Planned GPT (4K LBAs): userdata 0x2B8C00..0xD7D6FF (~43 GiB, keep type/unique GUIDs and attributes); iosroot 0xD7D700..0x1D7D6FF (0x1000000 blocks = 64 GiB, 1 MiB aligned); backup GPT area unchanged. Procedure: user backs up phone data -> boot OrangeFox recovery (adb) -> back up GPT (sgdisk --backup + raw dd of LBA 0-5 and last 6 blocks) to research/ -> sgdisk edit -> Format Data -> verify Android boots to setup. NOT EXECUTED YET.
 - **INTERNAL UFS WORKS FROM THE SHIM (read-only), user authorized internal-UFS approach incl. flashing (2026-10-15, "i allow everything").** Shim probe `shim/ufs.c` (commit `12ed3ed` + filter): ufshc@1d84000 is UFSHCI 2.1 (ver 0x210, cap 0x1587031F, 32 slots), ABL leaves HCE=1, HCS=0x10F (device present, lists ready, UIC ready); probe takes over UTRL at its own buffer (verifies UTRLBA readback before any doorbell), TEST UNIT READY/READ CAPACITY/READ(10) all succeed. LUN0 = 0x1D7D800 x 4 KiB (~126.6 GB), valid GPT (64 entries at LBA 2). Photos IMG_20261015_212916/213325/213429. Big LUN0 partitions (start in 4K LBAs / MiB): super 0xCA00/0x2200 (8.5 GiB), logdump 0x22CA00/64, minidump 0x230A00/128, rawdump 0x238A00/128, recovery 0x240C00/128, cache 0x248C00/384 ext4, exaid 0x260C00/384, cust 0x278C00/1024 ext4, **userdata 0x2B8C00/0x1AC4B MiB (~107 GiB), fs unreadable = encrypted (metadata encryption)**. cache..cust contiguous = only 1.75 GiB (too small for iOS ~10+ GiB). Plan needing user consent: shrink userdata in GPT (wipes Android data) and add an `iosroot` partition at the end of LUN0. LUNs 1-5 not listed yet (sdb..sdf backed up in backup/lun).
 - **fastboot limit measured (2026-10-15, read-only getvar):** `max-download-size: 805306368` (768 MiB); `max-fetch-size` unsupported; `is-userspace: no` (ABL fastboot). A `fastboot boot` image (shim+kernel+RAM disk) must be < 768 MiB, so the 2.5 GiB iOS shared cache cannot ride in the boot RAM disk even if XNU gets all RAM. Real userland needs storage access (UFS driver, or USB host) or a much smaller cache. Unlocking full RAM is still needed later (GUI).
-- **iOS 16 USERLAND SOURCE (Claude, 2026-10-15).** Chose **iPhone X (iPhone10,3/10,6, D22/D221AP)** iOS **16.7.16 (20H392)** over iPhone 8: same A11 (no PAC -> plain arm64, runs on Kryo 470/ARMv8.2), last iOS for A11; X userland is home-button-less and tall-screen (1125x2436 vs sweet 1080x2400), better fit for later GUI. Note the X has its OWN SystemOS cryptex (different digest from iPhone 8's). IPSW URL in `research/ipsw-x/URL.txt` (+ BuildManifest). Images on the user's external SSD (NOT in git, do not format that disk: it holds the user's photos): `/run/media/dipa/android/ios-sweet-ipsw/iPhone10,3_16.7.16_20H392/` — `087-86593-047.dmg` = Cryptex1,SystemOS (2,743,074,816 B), `087-86698-044.dmg` = OS rootfs (4,730,814,044 B), both zip CRC-32 verified, plus Firmware/*.root_hash/.trustcache/.mtree. AppOS cryptex is 087-86715-047.dmg (10 MB, same as iPhone 8).
+- **iOS 16 USERLAND SOURCE (Claude, 2026-10-15).** Chose **iPhone X (iPhone10,3/10,6, D22/D221AP)** iOS **16.7.16 (20H392)** over iPhone 8: same A11 (no PAC -> plain arm64, runs on Kryo 470/ARMv8.2), last iOS for A11; X userland is home-button-less and tall-screen (1125x2436 vs sweet 1080x2400), better fit for later GUI. Note the X has its OWN SystemOS cryptex (different digest from iPhone 8's). IPSW URL in `research/ipsw-x/URL.txt` (+ BuildManifest). Images on the user's external SSD (NOT in git, do not format that disk: it holds the user's photos): `/run/media/dipa/android/ios-sweet-ipsw/iPhone10,3_16.7.16_20H392/` 鈥?`087-86593-047.dmg` = Cryptex1,SystemOS (2,743,074,816 B), `087-86698-044.dmg` = OS rootfs (4,730,814,044 B), both zip CRC-32 verified, plus Firmware/*.root_hash/.trustcache/.mtree. AppOS cryptex is 087-86715-047.dmg (10 MB, same as iPhone 8).
   - Images are raw APFS; files use LZBITMAP (decmpfs type 14). 7z cannot decode. Tools: `ipsw` 3.1.738 (AUR ipsw-bin, user-approved) needs apfs-fuse on Linux; **apfs-fuse** built in user space (system cmake broken: cmake 4.4.4 wants libjsoncpp.so.27, jsoncpp 1.9.6 installed = partial upgrade, NOT fixed) with pip cmake + `-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_CXX_FLAGS="-include cstdint"`, installed to `~/.local/bin/apfs-fuse` (+apfs-dump-quick). Mount via a comma-free symlink (apfs-fuse splits options on ',' in `iPhone10,3`; exFAT has no symlinks -> put link elsewhere): `apfs-fuse LINK/087-86698-044.dmg MNT` -> `MNT/root/...`; unmount `fusermount3 -u MNT`.
   - Verified from headers: `dyld_shared_cache_arm64` magic `dyld_v1   arm64`; `/sbin/launchd`, `/usr/lib/dyld` = cputype 0x100000c subtype 0 (plain arm64). libSystem exists only inside the cache.
   - **BLOCKER for real userland via RAM disk:** shared cache = 3.10 GiB in 44 files (~2.5 GiB without the 592 MB `.symbols`), but the kernel manages only 1.20 GiB (0xb0000000..0xfd000000). Options: (A) give XNU the phone's full ~6 GB (banks 0x80000000+2G and 0x100000000+0xfcc00000, carve-out holes need pmap support) AND check fastboot max-download-size for a multi-GB boot image; (B) storage driver (Qualcomm UFS) to read a root from flash (no flashing allowed: would need a file/partition strategy); (C) run against individual dylibs extracted from the cache (uncertain).
@@ -1205,16 +1205,16 @@ Next moves (in order of value):
 1. **Log channel.** Either EDL+firehose (needs a WinUSB driver for 9008 via Zadig plus an
    SM8150 `prog_firehose_ddr.elf`; then the ring in userdata is readable after every crash), or
    move the whole gadget into the bare-metal shim where every step can be printed.
-2. GPU: find why `memnoc_gfx`/`snoc_dvm` stay halted with both GDSCs reporting PWR_ON — this is
+2. GPU: find why `memnoc_gfx`/`snoc_dvm` stay halted with both GDSCs reporting PWR_ON 鈥?this is
    the gate in front of the RSCC writes. Read `gpucc-sm8150.c` GDSC `cx_gdsc`/`gx_gdsc` and the
    `GPU_CC_CX_BCR`/`GPU_CC_GMU_BCR` release order next.
 
 ### PC environment survey (2026-10-27 late) - do not hunt for this again
 - `adb` / `fastboot` are already on PATH: `C:\Android\adb.exe`, `C:\Android\fastboot.exe`.
-- `C:\Users\kssszz666\Desktop\一加7Pro救砖包[安卓10]\` holds the OnePlus 9008 driver, TWRP and
+- `C:\Users\kssszz666\Desktop\涓€鍔?Pro鏁戠爾鍖匸瀹夊崜10]\` holds the OnePlus 9008 driver, TWRP and
   `MsmDownloadTool V4.0.exe` + `guacamole_21_H.23_200103.ops` (5.7 GB installer container; the
   firehose programmer is **not** reachable inside it - the .ops is only the outer package).
-- `C:\Program Files (x86)\搞机助手\` ships `Edlstart.exe` / `Edlrest.exe` / `DSAPI.dll` /
+- `C:\Program Files (x86)\鎼炴満鍔╂墜\` ships `Edlstart.exe` / `Edlrest.exe` / `DSAPI.dll` /
   `DSControls.dll`: a ready-made 9008 channel that can enter/leave EDL, and its GUI can read or
   back up partitions. **This is the cheapest route to the ring log**: dump the last 4 MB of
   `userdata` and decode it with `ios-guacamole-main/tools/sweet-log.py`.
@@ -1230,48 +1230,22 @@ Next moves (in order of value):
   `sweetusbdma` (low DMA) panics in host code (`Unaligned kernel data abort`).
 - Working images: `work\gpu\shim-boot-usable.img` (iOS usable, `sweetgpu=0 sweetusb=0 sweetfb_fill=1`).
 
-## 2026-10-27 深夜 — 同 SoC 参考移植 + zap/PAS + shim GPU 探针
+## 2026-10-27 娣卞 鈥?鍚?SoC 鍙傝€冪Щ妞?+ zap/PAS + shim GPU 鎺㈤拡
 
-### 关键发现：找到了同 SoC（SM8150 / Adreno 640）的可用参考
-`nithinyadavamaraboina-online/ios-rmx1931`（Realme X2 Pro）里有**已经跑通的 a640 全套**：
-- `shim/gpuprobe.c`（33 KB）：裸机完整 GPU 启动 —— GCC 时钟 → CX GDSC → gmu_rcg(XO) → ahb/cxo/cx_gmu → GMU 寄存器/TCM 测试 → Adreno SMMU(context bank) → RSC/PDC → 固件装载 → HFI 队列表 → CM3 释放 → HFI 消息 → **zap(PAS)** → SQE/环形队列/CP。每步前 `save("…")` 落盘。
-- `shim/log.c` + `ramlog.c` + `showlog.c` + `ufs.c`：**日志写到 userdata 末尾**，下次可从 TWRP 读回（我们一直缺的日志通道）。
-- 我们已把整套 shim 移植成 `shim-rmx/`（35 个文件 + `fw/` 固件，commit `515172c`），并写好了 `build.sh`。
+### 鍏抽敭鍙戠幇锛氭壘鍒颁簡鍚?SoC锛圫M8150 / Adreno 640锛夌殑鍙敤鍙傝€?`nithinyadavamaraboina-online/ios-rmx1931`锛圧ealme X2 Pro锛夐噷鏈?*宸茬粡璺戦€氱殑 a640 鍏ㄥ**锛?- `shim/gpuprobe.c`锛?3 KB锛夛細瑁告満瀹屾暣 GPU 鍚姩 鈥斺€?GCC 鏃堕挓 鈫?CX GDSC 鈫?gmu_rcg(XO) 鈫?ahb/cxo/cx_gmu 鈫?GMU 瀵勫瓨鍣?TCM 娴嬭瘯 鈫?Adreno SMMU(context bank) 鈫?RSC/PDC 鈫?鍥轰欢瑁呰浇 鈫?HFI 闃熷垪琛?鈫?CM3 閲婃斁 鈫?HFI 娑堟伅 鈫?**zap(PAS)** 鈫?SQE/鐜舰闃熷垪/CP銆傛瘡姝ュ墠 `save("鈥?)` 钀界洏銆?- `shim/log.c` + `ramlog.c` + `showlog.c` + `ufs.c`锛?*鏃ュ織鍐欏埌 userdata 鏈熬**锛屼笅娆″彲浠?TWRP 璇诲洖锛堟垜浠竴鐩寸己鐨勬棩蹇楅€氶亾锛夈€?- 鎴戜滑宸叉妸鏁村 shim 绉绘鎴?`shim-rmx/`锛?5 涓枃浠?+ `fw/` 鍥轰欢锛宑ommit `515172c`锛夛紝骞跺啓濂戒簡 `build.sh`銆?
+### zap shader / TrustZone PAS 鈥斺€?涔嬪墠鐨勬牴鏈己澶?- 鏈爲 `a640_zap.mdt` 鍘熸湰鏄?**0 瀛楄妭**锛泎ap 浠庢湭鍔犺浇杩囷紝GMU 鍥犳涓嶆斁琛岋紙`FW_INIT_RESULT` 鎭掍负 0锛屼笉鏄?`0xBABEFACE`锛夈€?- 浠?`work/vendor.img`锛圠ineageOS payload 瑙ｅ嚭鐨?vendor 鍒嗗尯锛夌敤 `tools/ext4-get.py` 鎶藉嚭锛?  `/firmware/a640_zap.mdt` 6860 B銆乣.b00` 148 B銆乣.b01` 6712 B銆乣.b02` 1968 B銆?- DT 璇佸疄锛歚pil_gpu { qcom,pas-id = <13>; qcom,firmware-name = "a640_zap"; }`銆?- **姝ｇ‘鐨?PAS 椤哄簭**锛堢収 ios-rmx1931锛屼笌鎴戞棭鏈熺寽娴嬩笉鍚岋級锛?  `SCM_PIL(cmd) = 0x42000000 | (2<<8) | cmd`锛孭AS id 13锛?  1. `cmd 7` PAS_IS_SUPPORTED锛坅rginfo 1锛?  2. `cmd 1` INIT_IMAGE锛坅rginfo 0x82锛宮etadata = 浠?.mdt锛?  3. `cmd 2` MEM_SETUP锛坅rginfo 3锛宺egion 8 KiB锛?  4. 鎶?`.b02` 鎷疯繘 region
+  5. `cmd 5` AUTH_AND_RESET锛坅rginfo 1锛夆啇 **璁よ瘉鏄?cmd 5锛屼笉鏄?cmd 2**
 
-### zap shader / TrustZone PAS —— 之前的根本缺失
-- 本树 `a640_zap.mdt` 原本是 **0 字节**；zap 从未加载过，GMU 因此不放行（`FW_INIT_RESULT` 恒为 0，不是 `0xBABEFACE`）。
-- 从 `work/vendor.img`（LineageOS payload 解出的 vendor 分区）用 `tools/ext4-get.py` 抽出：
-  `/firmware/a640_zap.mdt` 6860 B、`.b00` 148 B、`.b01` 6712 B、`.b02` 1968 B。
-- DT 证实：`pil_gpu { qcom,pas-id = <13>; qcom,firmware-name = "a640_zap"; }`。
-- **正确的 PAS 顺序**（照 ios-rmx1931，与我早期猜测不同）：
-  `SCM_PIL(cmd) = 0x42000000 | (2<<8) | cmd`，PAS id 13：
-  1. `cmd 7` PAS_IS_SUPPORTED（arginfo 1）
-  2. `cmd 1` INIT_IMAGE（arginfo 0x82，metadata = 仅 .mdt）
-  3. `cmd 2` MEM_SETUP（arginfo 3，region 8 KiB）
-  4. 把 `.b02` 拷进 region
-  5. `cmd 5` AUTH_AND_RESET（arginfo 1）← **认证是 cmd 5，不是 cmd 2**
-
-### 本轮提交的补丁
-| 补丁 | 内容 |
+### 鏈疆鎻愪氦鐨勮ˉ涓?| 琛ヤ竵 | 鍐呭 |
 |---|---|
-| 0113 | CX 侧 4 支 GPUCC 时钟（apb/snoc_dvm/cxo_aon/crc_ahb）+ 先证明再写（**实测会把只读步骤写崩**，已被 0115 改成 opt-in） |
-| 0114 | a640 寄存器表 `sweet_gpu_tables.h`（49 条 hwcg + 32 条 protect 跨度）+ `gpu_apply_hwcg()` |
-| 0115 | CX 时钟写改为 `sweetgpu_cxclk=1` 才做（默认不动） |
-| 0116 | PDC TCS/ENABLE 改为 `sweetgpu_pdc=1` 才做（默认跳过） |
-| 0117 | GMU RCG 默认不再手写（保留 ABL 的 200 MHz 配置），`sweetgpu_rcg=1` 恢复旧行为 |
-| 0118 | zap 固件内嵌 + SCM64 + PAS（**初版功能号猜错**） |
-| 0119 | 按 ios-rmx1931 修正 PAS 顺序（cmd 2 = MEM_SETUP，cmd 5 = AUTH） |
-| 0120 | 补 `extern uint64_t kvtophys(vm_offset_t)`（CI 报 implicit declaration） |
+| 0113 | CX 渚?4 鏀?GPUCC 鏃堕挓锛坅pb/snoc_dvm/cxo_aon/crc_ahb锛? 鍏堣瘉鏄庡啀鍐欙紙**瀹炴祴浼氭妸鍙姝ラ鍐欏穿**锛屽凡琚?0115 鏀规垚 opt-in锛?|
+| 0114 | a640 瀵勫瓨鍣ㄨ〃 `sweet_gpu_tables.h`锛?9 鏉?hwcg + 32 鏉?protect 璺ㄥ害锛? `gpu_apply_hwcg()` |
+| 0115 | CX 鏃堕挓鍐欐敼涓?`sweetgpu_cxclk=1` 鎵嶅仛锛堥粯璁や笉鍔級 |
+| 0116 | PDC TCS/ENABLE 鏀逛负 `sweetgpu_pdc=1` 鎵嶅仛锛堥粯璁よ烦杩囷級 |
+| 0117 | GMU RCG 榛樿涓嶅啀鎵嬪啓锛堜繚鐣?ABL 鐨?200 MHz 閰嶇疆锛夛紝`sweetgpu_rcg=1` 鎭㈠鏃ц涓?|
+| 0118 | zap 鍥轰欢鍐呭祵 + SCM64 + PAS锛?*鍒濈増鍔熻兘鍙风寽閿?*锛?|
+| 0119 | 鎸?ios-rmx1931 淇 PAS 椤哄簭锛坈md 2 = MEM_SETUP锛宑md 5 = AUTH锛?|
+| 0120 | 琛?`extern uint64_t kvtophys(vm_offset_t)`锛圕I 鎶?implicit declaration锛?|
 
-### 实测（阶梯二分，全部走 halt 判定）
-- `rpmh=1` 只读 → 活；`rpmh=4`（RSC 全写）→ **活**；`rpmh=5`（+PDC seq uCode）→ **活**；
-  `rpmh=6`（+PDC TCS/ENABLE）→ **崩**。⇒ 唯一会写崩 SoC 的是 PDC 使能。
-- `0116`（PDC 已跳过）→ 崩过一次，与 `rpmh=5` 应为等价 ⇒ **怀疑寄存器访问有临界/偶发性**，需要重复性验证。
-- 曾出现 `rpmh=1` 早期活、加 0113 后崩 ⇒ 结论依赖内核版本，务必记版本。
-
-### 下一步（按优先级）
-1. **构建 `shim-rmx/`**：CI 的 `build-all.yml` 是把补丁内联进 workflow 的巨型文件（18k 行），
-   要么在它里面加一个 `Build shim-rmx` 步骤 + 上传 `shim-rmx-boot.img`，要么本地装 aarch64-linux-gnu 工具链编。
-2. 刷 `shim-rmx` 镜像：它会在裸机里跑完整 a640 启动，每步写日志到 userdata 末尾；
-   再用 `SHIM_SHOWLOG` 或 TWRP 读回，判断停在哪个 stage。
-3. 内核侧：等 0120 编过、验证 zap 认证（左上角色条 绿/黄/红），再接 CM3/HFI。
+### 瀹炴祴锛堥樁姊簩鍒嗭紝鍏ㄩ儴璧?halt 鍒ゅ畾锛?- `rpmh=1` 鍙 鈫?娲伙紱`rpmh=4`锛圧SC 鍏ㄥ啓锛夆啋 **娲?*锛沗rpmh=5`锛?PDC seq uCode锛夆啋 **娲?*锛?  `rpmh=6`锛?PDC TCS/ENABLE锛夆啋 **宕?*銆傗噿 鍞竴浼氬啓宕?SoC 鐨勬槸 PDC 浣胯兘銆?- `0116`锛圥DC 宸茶烦杩囷級鈫?宕╄繃涓€娆★紝涓?`rpmh=5` 搴斾负绛変环 鈬?**鎬€鐤戝瘎瀛樺櫒璁块棶鏈変复鐣?鍋跺彂鎬?*锛岄渶瑕侀噸澶嶆€ч獙璇併€?- 鏇惧嚭鐜?`rpmh=1` 鏃╂湡娲汇€佸姞 0113 鍚庡穿 鈬?缁撹渚濊禆鍐呮牳鐗堟湰锛屽姟蹇呰鐗堟湰銆?
+### 涓嬩竴姝ワ紙鎸変紭鍏堢骇锛?1. **鏋勫缓 `shim-rmx/`**锛欳I 鐨?`build-all.yml` 鏄妸琛ヤ竵鍐呰仈杩?workflow 鐨勫法鍨嬫枃浠讹紙18k 琛岋級锛?   瑕佷箞鍦ㄥ畠閲岄潰鍔犱竴涓?`Build shim-rmx` 姝ラ + 涓婁紶 `shim-rmx-boot.img`锛岃涔堟湰鍦拌 aarch64-linux-gnu 宸ュ叿閾剧紪銆?2. 鍒?`shim-rmx` 闀滃儚锛氬畠浼氬湪瑁告満閲岃窇瀹屾暣 a640 鍚姩锛屾瘡姝ュ啓鏃ュ織鍒?userdata 鏈熬锛?   鍐嶇敤 `SHIM_SHOWLOG` 鎴?TWRP 璇诲洖锛屽垽鏂仠鍦ㄥ摢涓?stage銆?3. 鍐呮牳渚э細绛?0120 缂栬繃銆侀獙璇?zap 璁よ瘉锛堝乏涓婅鑹叉潯 缁?榛?绾級锛屽啀鎺?CM3/HFI銆?
