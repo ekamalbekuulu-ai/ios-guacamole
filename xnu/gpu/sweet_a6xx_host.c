@@ -487,6 +487,15 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
 		.src_iova = SLOT_IOVA(s) + offset, .src_w = w, .src_h = h, .src_pitch = pitch,
 		.sw = w, .sh = h, .dst_iova = A6_GVA_FB, .dst_pitch = fb_pitch, .filter = true,
 	};
+	/* sweetfull=1: stretch to the panel instead of fitting (the panel is 19.5:9,
+	 * iOS surfaces are not, so the default leaves bars). */
+	{
+		uint32_t full = 0;
+		if (PE_parse_boot_argn("sweetfull", &full, sizeof(full)) && full) {
+			b.dx = 0; b.dy = 0; b.dw = PANEL_W; b.dh = PANEL_H;
+			goto geometry_done;
+		}
+	}
 	/* Fit the frame into the panel, keeping the aspect ratio. */
 	if ((uint64_t)w * PANEL_H <= (uint64_t)PANEL_W * h) {
 		b.dh = PANEL_H;
@@ -525,7 +534,8 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
 		stat_clean_abs = stat_gpu_abs = 0;
 	}
 	if (!rc) {
-		sweet_display_fit_x = (int)b.dx;
+	geometry_done:
+	sweet_display_fit_x = (int)b.dx;
 		sweet_display_fit_w = (int)b.dw;
 	}
 	if (out_dx) {
