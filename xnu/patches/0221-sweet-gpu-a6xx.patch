@@ -2056,8 +2056,8 @@ diff --git a/bsd/dev/sweet_accel_client.cpp b/bsd/dev/sweet_accel_client.cpp
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_accel_client.cpp
-@@ -0,0 +1,268 @@
-+﻿/*
+@@ -0,0 +1,272 @@
++/*
 + * SweetAccelerator user client: the door Metal talks through.
 + *
 + * SweetAccelerator.cpp publishes the IOService with MetalPluginName=SweetMetal;
@@ -2085,7 +2085,11 @@ new file mode 100644
 +#include <IOKit/IOLib.h>
 +#include <IOKit/IOMemoryDescriptor.h>
 +#include <vm/pmap.h>
-+#include "SweetSurface.h"
++/* SweetSurface.h lives in iokit/Kernel/arm (patch 0046) and this file compiles
++ * from bsd/dev, where neither the search path nor the compiler's per-file
++ * directory finds a bare "SweetSurface.h". Keep it relative rather than adding
++ * an include path to the kernel build. */
++#include "../../iokit/Kernel/arm/SweetSurface.h"
 +
 +extern "C" {
 +int sweet_a6xx_bo_alloc(uint64_t size, uint64_t *h, uint64_t *gpu_va, uint64_t *sz);
@@ -2329,8 +2333,8 @@ diff --git a/bsd/dev/sweet_overlay.c b/bsd/dev/sweet_overlay.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_overlay.c
-@@ -0,0 +1,329 @@
-+﻿/*
+@@ -0,0 +1,336 @@
++/*
 + * Install a file tree into the iOS root volume at boot.
 + *
 + * macOS/iOS pick a Metal driver by loading the bundle named in the GPU
@@ -2355,12 +2359,19 @@ new file mode 100644
 +#include <sys/kauth.h>
 +#include <sys/mount.h>
 +#include <sys/vnode_if.h>
++#include <sys/vnode_internal.h>	/* vnode_setsize: not in the public vnode.h */
 +#include <kern/thread.h>
 +#include <kern/clock.h>
 +#include <kern/sched_prim.h>
 +#include <libkern/libkern.h>
 +#include <pexpert/pexpert.h>
 +#include <pexpert/device_tree.h>
++
++/* The arm64 kernel build has -Werror=implicit-function-declaration and neither
++ * of these is reachable from the headers above; declare them exactly as XNU
++ * defines them (sweet_a6xx_host.c declares thread_terminate the same way). */
++extern int vn_symlink(vnode_t dvp, char *name, int segflg, char *target, vfs_context_t ctx);
++extern kern_return_t thread_terminate(thread_t);
 +
 +extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
 +extern void thread_deallocate(thread_t);
