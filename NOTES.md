@@ -1,5 +1,57 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Session handoff 2026-10-28 (guacamole, a640 driver in the kernel)
+
+Goal: find why `a6_power_up()` never returns inside XNU when it is fine in the
+bare-metal shim, then carry on to Metal.
+
+### Why the old "halt and photograph" plan was not enough
+- `sweeta6xx_halt=1` and `sweeta6xx_stop=N` halted with `for (;;) wfe` on the
+  bring-up **kernel thread**. The rest of the boot keeps running: the console
+  keeps printing and SweetFramebuffer / `sweetfb_noconsole=1` mutes it once the
+  GUI presents, so the frozen frame is gone before it can be photographed.
+- Bisecting phases therefore cost one flash cycle per guess and could produce
+  no readable frame at all.
+
+### Changed (commit `34d27da`, patch `xnu/patches/0130-sweet-gpu-a6xx.patch`)
+- `a6_mark("...")` records `a6_core_step` and logs `step: <name>`. Markers sit
+  at every sub-step of `power_cx` (`cx:read`, `cx:gcc-branches`, `cx:gdsc`,
+  `cx:gmu-rcg`, `cx:gpucc-branches`, `cx:mhz-read`), `gmu_boot` (`gmu:smmu`,
+  `gmu:rpmh`, `gmu:hfi-table`, `gmu:rscc`, `gmu:fw-load`, `gmu:kick`,
+  `gmu:poll-init`), `gmu_hfi` (`hfi:arc-votes`, `hfi:ddr-table`, `hfi:send`,
+  `hfi:oob`, `hfi:gx-up`) and `gpu_cp` (`cp:smmu-bank`, `cp:hw-init`, `cp:sqe`,
+  `cp:me-init`, `cp:zap`, `cp:secure-off`), plus `init:enter`, `init:pool-ok`,
+  `thread:enter`, `core:done`. `a6_core_phase` tracks 1..4 and 5 = done.
+- Watchdog thread (`sweet_a6xx_host.c`): waits `sweeta6xx_wd=` seconds
+  (default 45, 0 = off) and, if `a6_core_done` is still 0, calls
+  `panic("SWEET A6XX WATCHDOG: <s> s, phase <n>, step '<name>', stage <n>")`.
+  A panic stops every CPU and draws over everything, so **one photo names the
+  stall** - no bisect, no flash per guess.
+- All `wfe` halts are now panics for the same reason; the pool-allocation
+  failure path panics with the size instead of hanging.
+- The unbounded HFI response drain in `hfi_send` is capped at `4 * QSIZE`
+  iterations: a malformed zero-length response could spin there forever.
+
+### Run
+CI `build-all` with `do_kernel=true do_shim=true do_root=false
+console_debug=true cpus=8 variant=a6wd1 extra_args='sweeta6xx=3
+sweetzap=0x98b15000 sweeta6xx_wd=45'`. `console_debug=true` keeps
+`sweetfb_noconsole=1` out of the command line and adds
+`sweetlogdump=1 -enable_kprintf_spam`, i.e. the console is not muted.
+Fetch with `work/a6wd/wait-shim.ps1` (verifies the new strings inside the image
+before flashing), then `fastboot boot` and photograph the panel.
+
+### Read the photo like this
+- `WATCHDOG ... step 'gmu:poll-init'` -> the GMU never writes `BABEFACE` into
+  `GMU_INIT_RESULT`: firmware load / CM3 release, not HFI or CP.
+- `step 'hfi:send'` -> the GMU does not answer an HFI message; a failing
+  `hfi:arc-votes` first is cmd-db, not HFI.
+- `step 'cp:*'` -> SMMU bank, hw_init, SQE load or zap; `cp:zap` means the
+  PAS/SCM path, which the shim does successfully and XNU has never done.
+- `phase 0` / no `step:` line at all -> the thread never ran: pool or thread
+  start is the problem.
+- `RESULT stage=3 ...` panic -> bring-up actually completed.
+
 ## Agent handoff / active work (2026-10-21, latest)
 
 ### Session handoff (2026-10-21 22:20)
