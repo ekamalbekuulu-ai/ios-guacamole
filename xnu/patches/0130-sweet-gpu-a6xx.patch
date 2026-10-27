@@ -1206,7 +1206,7 @@ diff --git a/bsd/dev/sweet_a6xx_host.c b/bsd/dev/sweet_a6xx_host.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx_host.c
-@@ -0,0 +1,313 @@
+@@ -0,0 +1,329 @@
 +/*
 + * Kernel environment for the Adreno 640 core in sweet_a6xx.c.
 + *
@@ -1261,6 +1261,7 @@ new file mode 100644
 +static struct a6_gpu gpu;
 +static vm_offset_t pool_kva;
 +static volatile bool gpu_ready;
++static int resolved_stage;	/* sweeta6xx (or the gpu= alias) resolved in init */
 +static LCK_GRP_DECLARE(sweet_a6xx_grp, "sweet_a6xx");
 +static LCK_MTX_DECLARE(sweet_a6xx_lock, &sweet_a6xx_grp);
 +
@@ -1448,9 +1449,8 @@ new file mode 100644
 +gpu_thread(void *arg __unused, wait_result_t wr __unused)
 +{
 +	uint64_t t0 = mach_absolute_time(), ns;
-+	int stage = 0;
++	int stage = resolved_stage;
 +
-+	PE_parse_boot_argn("sweeta6xx", &stage, sizeof(stage));
 +	lck_mtx_lock(&sweet_a6xx_lock);
 +	int rc = a6_power_up(&gpu);
 +	if (!rc) {
@@ -1486,14 +1486,30 @@ new file mode 100644
 +{
 +	uint32_t stage = 0;
 +	uint64_t zap = 0;
++	uint32_t alias = 0;
++	extern char *PE_boot_args(void);
 +
-+	if (!PE_parse_boot_argn("sweeta6xx", &stage, sizeof(stage)) || stage == 0) {
++	/* Evidence first: prove the hook ran and show what the kernel actually
++	 * received. Without this a silent boot-argument mismatch looks exactly
++	 * like the driver not being in the kernel at all. */
++	int got = PE_parse_boot_argn("sweeta6xx", &stage, sizeof(stage));
++	int got_alias = PE_parse_boot_argn("gpu", &alias, sizeof(alias));
++	a6_log("init called: sweeta6xx=%u (found %d), gpu=%u (found %d)\n",
++	    stage, got, alias, got_alias);
++	a6_log("boot-args: [%s]\n", PE_boot_args() ? PE_boot_args() : "(null)");
++
++	if (!stage && alias) {
++		stage = alias;		/* ios-sweet/redwood used gpu=1 */
++	}
++	if (!stage) {
++		a6_log("no stage requested, nothing to do\n");
 +		return;
 +	}
 +	if (PE_parse_boot_argn("sweetzap", &zap, sizeof(zap)) && zap) {
 +		a6_set_zap_region(zap, 0x2000);
 +	}
 +	a6_set_zap_enable(stage >= 2);
++	resolved_stage = (int)stage;
 +
 +	vm_offset_t va = 0;
 +	if (kmem_alloc_contig(kernel_map, &va, A6_POOL_SIZE, PAGE_MASK, 0,
