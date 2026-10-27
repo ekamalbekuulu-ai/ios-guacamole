@@ -1,0 +1,77 @@
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -29,6 +29,7 @@
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ void sweet_usb_probe(void);
+ static void sweet_usb_gadget_start(vm_offset_t dwc);
++static void ud_bringup_thread(void *arg, wait_result_t wr);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ 
+ /*
+@@ -193,7 +194,17 @@
+ 	    usb_rd(dwc, 0xc140) & 0x3, (usb_rd(dwc, 0xc140) >> 8) & 0xff,
+ 	    (usb_rd(dwc, 0xc140) >> 16) & 0xff, (usb_rd(dwc, 0xc140) >> 24) & 0xff);
+ 	if (enabled >= 2) {
+-		sweet_usb_gadget_start(dwc);
++		/*
++		 * The bring-up runs on its own thread: a controller that stalls
++		 * must never delay or block the boot. The requirement for this
++		 * board is that iOS comes up whatever USB does.
++		 */
++		printf("SWEET USB: gadget on its own thread, deferred\n");
++		thread_t t;
++		if (kernel_thread_start(ud_bringup_thread, (void *)dwc, &t) == KERN_SUCCESS) {
++			thread_deallocate(t);
++		}
++		return;
+ 	}
+ 	if (cbcr[5] & CBCR_CLK_OFF) {
+ 		printf("SWEET USB: ahb2phy clock off; QUSB2 PHY not read\n");
+@@ -746,6 +757,26 @@
+ 	}
+ }
+ 
++/*
++ * The controller is brought up long after the rest of the boot, so a USB
++ * problem can never take the system down with it: by the time this runs iOS
++ * is already up. `sweetusbdelay=<seconds>` changes the wait.
++ */
++static void
++ud_bringup_thread(void *arg, wait_result_t wr __unused)
++{
++	int delay_s = 15;
++	(void)PE_parse_boot_argn("sweetusbdelay", &delay_s, sizeof(delay_s));
++	if (delay_s < 0) {
++		delay_s = 0;
++	}
++	if (delay_s > 0) {
++		printf("SWEET USB: waiting %d s before touching the controller\n", delay_s);
++		ud_sleep_ms((unsigned)delay_s * 1000u);
++	}
++	sweet_usb_gadget_start((vm_offset_t)arg);
++}
++
+ static void
+ sweet_usb_gadget_start(vm_offset_t dwc)
+ {
+@@ -801,6 +832,9 @@
+ 		return;
+ 	}
+ 
++	printf("SWEET USB: GTXFIFOSIZ %08x %08x %08x %08x GRXFIFOSIZ %08x GHWPARAMS3 %08x\n",
++	    dwc_rd(0xc300), dwc_rd(0xc304), dwc_rd(0xc308), dwc_rd(0xc30c),
++	    dwc_rd(0xc380), dwc_rd(0xc14c));
+ 	printf("SWEET USB: gadget step 2: event buffer + DCFG/DEVTEN\n");
+ 	/* How many address bits does the event-buffer register really keep?
+ 	 * 0xffffffff coming back means the core can be handed addresses above
+@@ -899,6 +933,9 @@
+ 		printf("SWEET USB: stopping before step 6 (sweetusbstep=%d)\n", maxstep);
+ 		return;
+ 	}
++	/* PRTCAPDIR: 2 = device only. Print what it was, then force it. */
++	printf("SWEET USB: GCTL PRTCAPDIR was %u\n", (dwc_rd(GCTL) >> 12) & 3);
++	dwc_wr(GCTL, (dwc_rd(GCTL) & ~(3u << 12)) | (2u << 12));
+ 	printf("SWEET USB: gadget step 6: RUN_STOP\n");
+ 	usb_mark(SWEET_USB_MARK_RUN);
+ 	dwc_wr(DCTL, dwc_rd(DCTL) | DCTL_RUN_STOP);
