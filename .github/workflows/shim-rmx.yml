@@ -1,0 +1,40 @@
+name: shim-rmx
+
+# Builds the a640 GPU bring-up shim (shim-rmx/) on a Linux runner. It is a
+# bare-metal aarch64 program, so a cross gcc is all it needs; the boot image is
+# wrapped locally (tools/repack-boot.py) from a known-good shim image.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'shim-rmx/**'
+      - '.github/workflows/shim-rmx.yml'
+
+jobs:
+  shim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装交叉工具链
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: 编 shim-rmx
+        working-directory: shim-rmx
+        run: |
+          NO_PACK=1 bash build.sh
+          ls -l out/Image out/shim.elf
+          aarch64-linux-gnu-size out/shim.elf
+
+      - name: 上传
+        uses: actions/upload-artifact@v4
+        with:
+          name: shim-rmx
+          path: |
+            shim-rmx/out/Image
+            shim-rmx/out/shim.elf
+          if-no-files-found: error
