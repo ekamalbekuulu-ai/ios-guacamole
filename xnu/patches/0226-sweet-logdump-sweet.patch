@@ -1,0 +1,18 @@
+sweet-logdump: also dump our own SWEET lines from the previous boot
+
+Without this the ring dump hides every driver line (the filter only keeps
+crashes and daemon failures), so a silent Metal failure leaves no evidence
+anywhere.
+
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -812,8 +812,8 @@
+ sweet_log_wanted(const char *l)
+ {
+ 	static const char * const keys[] = {
++		"CRASH ", "exited", "Exit", "failed", "Failed", "error", "Error",
++		"SWEET ", "panic", "SpringBoard", "xpcproxy", "fairplayd", "bluetoothd",
+ 		"watchdog", "boot task", "mount", "fsck", "keybag", "AMFI", "abort",
+ 		"timeout", "Timeout", "not found", "No such",
+ 	};
