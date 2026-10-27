@@ -181,7 +181,7 @@ diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1138 @@
+@@ -0,0 +1,1151 @@
 +/*
 + * Adreno 640 core (see sweet_a6xx.h). The bring-up follows shim/gpuprobe.c,
 + * which first worked on the phone; that file has the reasoning behind each
@@ -910,8 +910,21 @@ new file mode 100644
 +	const uint8_t *mdt = a6_firmware("a640_zap.mdt", &mlen), *b02 = a6_firmware("a640_zap.b02", &slen);
 +	if (!mdt || !b02 || slen > sizeof(seg) || slen > zap_size)
 +		return -1;
-+	a6_write(a6_pool_pa(g, A6_OFF_ZAP_META), mdt, mlen);
-+	int64_t rc = scm(1, 2 | (2u << 6), PAS_GPU, a6_pool_pa(g, A6_OFF_ZAP_META), 0, &r1);
++	/*
++	 * SCM_PIL(INIT_IMAGE) takes a 32-bit physical address on this platform. The
++	 * pool sits above 4 GiB (0x184a00000 here), so passing pool+A6_OFF_ZAP_META
++	 * truncates and TrustZone rejects the image with rc 1, r1 0x82 - which is
++	 * exactly what the kernel logged while bare-metal shim-rmx (low memory)
++	 * authenticated the same blob. Put the metadata in the low zap region
++	 * instead (8 KB); TZ copies it during INIT_IMAGE, before .b02 is written
++	 * over the same region below.
++	 */
++	uint64_t meta_pa = zap_region;
++	a6_write(meta_pa, mdt, mlen);
++	a6_log("zap: meta %llx len %u (pool %llx low)
++", (unsigned long long)meta_pa,
++	    mlen, (unsigned long long)a6_pool_pa(g, A6_OFF_ZAP_META));
++	int64_t rc = scm(1, 2 | (2u << 6), PAS_GPU, meta_pa, 0, &r1);
 +	if (rc || r1) {
 +		a6_log("zap: init image rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
 +		return -1;
