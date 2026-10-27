@@ -1,0 +1,46 @@
+﻿name: metal-bundle
+
+# Builds phone/metal into SweetMetal.bundle for iOS 16 arm64 and uploads it.
+# Only public frameworks are used (Foundation/Metal/IOSurface/IOKit), so the
+# stock iPhoneOS SDK from Xcode is enough - no private headers, no IPSW SDK.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'phone/metal/**'
+      - '.github/workflows/metal.yml'
+
+jobs:
+  bundle:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: show SDK
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: build SweetMetal.bundle
+        run: |
+          set -e
+          B=phone/metal/out/SweetMetal.bundle
+          rm -rf "$B"; mkdir -p "$B"
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -O2 -fobjc-arc -bundle -fembed-bitcode-marker \
+            -o "$B/SweetMetal" \
+            phone/metal/SweetMetal.m phone/metal/a6draw.m phone/metal/mtlk.c phone/metal/sweetgpu.c \
+            -framework Foundation -framework Metal -framework IOSurface -framework IOKit
+          cp phone/metal/Info.plist "$B/Info.plist"
+          codesign -f -s - "$B" || true
+          file "$B/SweetMetal"
+          ls -l "$B"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sweet-metal
+          path: phone/metal/out/SweetMetal.bundle
+          if-no-files-found: error
