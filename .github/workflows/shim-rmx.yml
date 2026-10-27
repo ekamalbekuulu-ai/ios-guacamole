@@ -1,11 +1,17 @@
 name: shim-rmx
 
-# Builds the a640 GPU bring-up shim (shim-rmx/) on a Linux runner. It is a
-# bare-metal aarch64 program, so a cross gcc is all it needs; the boot image is
-# wrapped locally (tools/repack-boot.py) from a known-good shim image.
+# Builds the a640 GPU bring-up shim (shim-rmx/) on a Linux runner.
+# inputs:
+#   showlog: "1" -> also build the variant that renders the previous run's log
+#            on the screen (SHIM_SHOWLOG), which is how the probe log is read.
 
 on:
   workflow_dispatch:
+    inputs:
+      showlog:
+        description: 'Build the SHIM_SHOWLOG variant as well'
+        required: false
+        default: '1'
   push:
     paths:
       - 'shim-rmx/**'
@@ -23,11 +29,20 @@ jobs:
           sudo apt-get install -y -qq gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
           aarch64-linux-gnu-gcc --version | head -1
 
-      - name: 编 shim-rmx
+      - name: 编 shim-rmx（探针）
         working-directory: shim-rmx
         run: |
           NO_PACK=1 bash build.sh
-          ls -l out/Image out/shim.elf
+          cp out/Image out/Image.gpuprobe
+          ls -l out/Image.gpuprobe
+
+      - name: 编 shim-rmx（showlog）
+        working-directory: shim-rmx
+        run: |
+          rm -rf out
+          SHIM_CFLAGS=-DSHIM_SHOWLOG NO_PACK=1 bash build.sh
+          cp out/Image out/Image.showlog
+          ls -l out/Image.showlog out/shim.elf
           aarch64-linux-gnu-size out/shim.elf
 
       - name: 上传
@@ -35,6 +50,6 @@ jobs:
         with:
           name: shim-rmx
           path: |
-            shim-rmx/out/Image
-            shim-rmx/out/shim.elf
+            shim-rmx/out/Image.gpuprobe
+            shim-rmx/out/Image.showlog
           if-no-files-found: error
