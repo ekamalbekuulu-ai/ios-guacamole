@@ -1125,3 +1125,34 @@ code does.**
   the full screen regression comes back (black bars).
 - `sweetlogdump=1` prints the previous run's persistent ring tail at boot: the cheapest
   way to see where a crash happened, no USB required.
+
+### Session 2026-10-27 evening: GPU rpmh truth + what blocks the log channel
+
+Measurements (all from hardware, photos of the console):
+- `0109` (`sweetgpu_rpmh=<n>` ladder): `n=1` (read RSCC/PDC) **survives**; `n=6` (full RSC+PDC
+  writes) **wedges the SoC into EDL**. So the blocks are readable but not writable yet.
+- `0110` (un-gate `gcc_gpu_gpll0_clk_src` BIT(15) / `..._div_clk_src` BIT(16) in GCC `0x52004`):
+  the gate register does change (`0x1605d7f -> 0x161dd7f`), but `gcc_gpu_memnoc_gfx_clk` and
+  `gcc_gpu_snoc_dvm_gfx_clk` still read `(still halted)`, and the RSCC write still wedges.
+  => the parent gate is not the missing door; the halt comes from the power/reset domain.
+- USB gadget: `sweetusb=2 + sweetvbus=3` attaches (`USB\VID_0000&PID_0002`,
+  `DEVICE_DESCRIPTOR_FAILURE`) but ep0 never answers and **no DWC3 event is ever seen**.
+  `sweetusbdma=3584` (DMA at 0xE0000000) **panics** (`Unaligned kernel data abort`), so the
+  low-DMA path is not a safe workaround.
+- TWRP (`twrp-3.7.1_12-0-guacamole.img`) boots from fastboot but its **adb never comes up**
+  on this device state, so `pull-log.ps1` cannot read the ring.
+
+Vendor facts that were wrong in the handoff and are now fixed (from
+`OnePlusOSS/android_kernel_oneplus_sm8150`, `adreno_a6xx_gmu.c` + `sm8150-gpu.dtsi`):
+- RSCC registers live inside the GPU register space (RSCC base `0x23400` dwords), reached at
+  `0x02c6a000 + (dword - 0x1a800)*4`; `RSCC_RSC_STATUS0_DRV0` is `0x02C8D010`.
+- PDC windows are `0xB280000` (cfg) and `0xB480000` (seq), 64 KiB each.
+- The `CONTROL_REQ/ACK` handshake is the wake-from-slumber path, not needed for a cold boot.
+
+Next moves (in order of value):
+1. **Log channel.** Either EDL+firehose (needs a WinUSB driver for 9008 via Zadig plus an
+   SM8150 `prog_firehose_ddr.elf`; then the ring in userdata is readable after every crash), or
+   move the whole gadget into the bare-metal shim where every step can be printed.
+2. GPU: find why `memnoc_gfx`/`snoc_dvm` stay halted with both GDSCs reporting PWR_ON — this is
+   the gate in front of the RSCC writes. Read `gpucc-sm8150.c` GDSC `cx_gdsc`/`gx_gdsc` and the
+   `GPU_CC_CX_BCR`/`GPU_CC_GMU_BCR` release order next.
