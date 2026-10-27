@@ -1206,7 +1206,7 @@ diff --git a/bsd/dev/sweet_a6xx_host.c b/bsd/dev/sweet_a6xx_host.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx_host.c
-@@ -0,0 +1,491 @@
+@@ -0,0 +1,503 @@
 +/*
 + * Kernel environment for the Adreno 640 core in sweet_a6xx.c.
 + *
@@ -1497,6 +1497,18 @@ new file mode 100644
 +	a6_log("init called: sweeta6xx=%u (found %d), gpu=%u (found %d)\n",
 +	    stage, got, alias, got_alias);
 +	a6_log("boot-args: [%s]\n", PE_boot_args() ? PE_boot_args() : "(null)");
++
++	/*
++	 * TEMPORARY diagnostic: stop here, unconditionally, so the two lines above
++	 * can actually be read off the panel. The console scrolls far too fast to
++	 * photograph, and this hook runs after the CPU bring-up, i.e. below what a
++	 * photo of the early boot covers. Remove this block once the boot-argument
++	 * question is settled.
++	 */
++	a6_log("DIAG ENTRY HALT - remove after boot-arg question is settled\n");
++	for (;;) {
++		__asm__ __volatile("wfe");
++	}
 +
 +	if (!stage && alias) {
 +		stage = alias;		/* ios-sweet/redwood used gpu=1 */
