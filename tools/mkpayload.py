@@ -132,6 +132,31 @@ def add_ramdisk_to_adt(adt_blob, phys, size):
     return adt.serialize(root)
 
 
+def add_gpufw_to_adt(adt_blob, directory):
+    """Return the ADT with /chosen "gpufw,<name>" for each GPU firmware file.
+
+    bsd/dev/sweet_a6xx_host.c a6_firmware() reads them from there, so the GPU
+    microcode travels inside the ADT and needs no ramdisk or filesystem.
+    """
+    names = ('a640_gmu.bin', 'a630_sqe.fw', 'a640_zap.mdt', 'a640_zap.b02')
+    root, _ = adt.parse(adt_blob)
+    chosen = next(c for c in root.children if c.name == 'chosen')
+    added = 0
+    for name in names:
+        path = os.path.join(directory, name)
+        if not os.path.exists(path):
+            print('gpufw: %s not found, skipped' % name)
+            continue
+        blob = open(path, 'rb').read()
+        prop = 'gpufw,' + name
+        chosen.props = [p for p in chosen.props if p[0] != prop]
+        chosen.props.append((prop, 0, blob))
+        added += 1
+        print('gpufw: %s %d bytes' % (name, len(blob)))
+    assert added, 'gpufw: no firmware found in %s' % directory
+    return adt.serialize(root)
+
+
 def adt_dram(adt_blob):
     """Kernel-managed RAM <base, size> from the ADT's /chosen dram-base/dram-size."""
     root, _ = adt.parse(adt_blob)
@@ -140,7 +165,7 @@ def adt_dram(adt_blob):
             struct.unpack('<Q', chosen.prop('dram-size'))[0])
 
 
-def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
+def build(kernel_path, adt_path, cmdline, ramdisk_path=None, gpufw_dir=None):
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
     nfix = apply_chained_fixups(buf, m)
@@ -154,6 +179,8 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
     kernel_end = (kernel_end + PAGE - 1) & ~(PAGE - 1)
 
     adt_blob = open(adt_path, 'rb').read()
+    if gpufw_dir:
+        adt_blob = add_gpufw_to_adt(adt_blob, gpufw_dir)
     # The ADT decides where the kernel's RAM is (mkadt.py --highmem).
     PHYS_BASE, MEM_SIZE = adt_dram(adt_blob)
     pieces = [(s['vmaddr'], s['vmsize'], buf[s['fileoff']:s['fileoff'] + s['filesize']]) for s in segs]
@@ -198,8 +225,10 @@ if __name__ == '__main__':
     ap.add_argument('kernel'); ap.add_argument('adt'); ap.add_argument('out')
     ap.add_argument('--cmdline', default='debug=0xc serial=3 cpus=1 keepsyms=1')
     ap.add_argument('--ramdisk', help='root image for md0 (boot with rd=md0)')
+    ap.add_argument('--gpufw', help='directory with a640_gmu.bin / a630_sqe.fw / a640_zap.* '
+                                    'to embed as /chosen gpufw,<name>')
     a = ap.parse_args()
-    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk)
+    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk, a.gpufw)
     open(a.out, 'wb').write(blob)
     for k, v in info.items():
         if k != 'segs':

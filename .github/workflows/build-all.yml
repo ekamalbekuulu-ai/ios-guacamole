@@ -1,4 +1,4 @@
-﻿name: build-all
+name: build-all
 
 # 一加 7 Pro（guacamole / SM8150）跑 iOS 16 —— 一条流水线出三个成品：
 #   xnu-kernel        内核 Mach-O（macOS runner 编，绕不过 Apple 的工具链）
@@ -260,7 +260,9 @@ jobs:
             RD="--ramdisk firmware/a640_gmu.bin"
             echo "payload 会带上 a640_gmu.bin ($(stat -c%s firmware/a640_gmu.bin) 字节)"
           fi
-          python3 tools/mkpayload.py "$K" shim/out/guacamole.adt shim/out/payload.bin --cmdline "$CMDLINE" $RD
+          # 四个 GPU 固件（GMU / SQE / zap.mdt / zap.b02）以 /chosen gpufw,<name> 进 ADT，
+          # 内核 bsd/dev/sweet_a6xx_host.c 的 a6_firmware() 从那里取（sweeta6xx=N）。
+          python3 tools/mkpayload.py "$K" shim/out/guacamole.adt shim/out/payload.bin --cmdline "$CMDLINE" $RD --gpufw firmware
           ( cd shim && BOARD=guacamole DTB=../dtb/boot_unpacked/dtb bash ./build.sh ../shim/out/payload.bin )
           V="${{ inputs.variant }}"
           cp shim/out/shim-boot.img "shim-boot-$V.img"
