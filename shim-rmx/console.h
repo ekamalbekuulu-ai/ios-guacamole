@@ -5,10 +5,10 @@
  * Text console on the splash framebuffer ABL scans out. Geometry comes from
  * the display pipe at runtime (con_init); 32 bpp, little-endian a8r8g8b8.
  */
-#define FB_SPLASH_BASE	0x9d000000UL	/* RMX1931 reserved-memory cont_splash_region */
+#define FB_SPLASH_BASE	0x9c000000UL	/* guacamole cont_splash_region (stock DTB + live FDT) */
 #define FB_SPLASH_SIZE	0x02400000UL
-#define FB_W		1080
-#define FB_H		2400
+#define FB_W		1440		/* panel-width 0x5a0 */
+#define FB_H		3120
 
 #define RED	0xffff0000U
 #define BLUE	0xff0000a0U
@@ -22,6 +22,8 @@ void con_clear(uint32_t bg);
 void con_skip(void);
 void con_home(void);
 int con_rows(void);
+int con_row(void);
+void con_clear_range(int r0, int r1, uint32_t bg);
 unsigned con_text(const char *s, unsigned len, uint32_t fg);
 void con_str(const char *label, const char *s);
 void con_hex(const char *label, uint64_t v);

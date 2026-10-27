@@ -19,6 +19,7 @@
 #ifdef SHIM_GPUPROBE
 #include <stdint.h>
 #include "gpuprobe.h"
+#include "fdt.h"
 #include "log.h"
 #include "util.h"
 
@@ -719,9 +720,24 @@ static void gmu_hfi(void (*save)(const char *), int cb)
  * from the stock DTB (boot_unpacked/dtb). RMX1931's 0x99515000 / flame's own
  * value do not exist on this board: MEM_SETUP + AUTH_AND_RESET against the
  * wrong region either fails silently or lets TZ clobber DRAM. */
-#define ZAP_REGION	0x98715000UL	/* reserved-memory pil_gpu_region, 8K */
-#define ZAP_SIZE	0x2000UL
 #define ZAP_META	(GMEM + 0xa0000)	/* metadata buffer TZ reads */
+/* Fallback only: the value in the static boot.img DTB. Overridden at runtime
+ * from the live tree (see gpuprobe_set_dtb): ABL rebases the pil_* carve-outs
+ * by 4 MiB, so the static value can point into freed DRAM. */
+static uintptr_t zap_region = 0x98715000UL;
+static uint32_t zap_size = 0x2000UL;
+static int zap_from_dtb;
+
+void gpuprobe_set_dtb(uintptr_t dtb)
+{
+	uint64_t a = 0, s = 0;
+	if (fdt_node_reg64(dtb, "pil_gpu_region", &a, &s) &&
+	    a >= 0x10000000UL && s >= 0x1000UL && s <= 0x100000UL) {
+		zap_region = (uintptr_t)a;
+		zap_size = (uint32_t)s;
+		zap_from_dtb = 1;
+	}
+}
 #define SCM_PIL(cmd)	(0x42000000UL | (2u << 8) | (cmd))	/* SMC64 std call, SIP, svc PIL */
 
 extern const uint8_t zap_mdt[], zap_mdt_end[], zap_b02[], zap_b02_end[];
@@ -748,8 +764,10 @@ static void copy_in(uintptr_t dst, const uint8_t *src, uint32_t len)
 static void zap_load(void (*save)(const char *))
 {
 	uint64_t r1 = 0;
-	log_printf("zap: board region %lx size %lx metadata %lx (%u bytes)\n",
-		   (uint64_t)ZAP_REGION, (uint64_t)ZAP_SIZE, (uint64_t)ZAP_META,
+	log_printf("zap: region %lx size %lx (%s) metadata %lx (%u bytes)\n",
+		   (uint64_t)zap_region, (uint64_t)zap_size,
+		   zap_from_dtb ? "live DTB" : "built-in fallback",
+		   (uint64_t)ZAP_META,
 		   (uint32_t)(zap_mdt_end - zap_mdt));
 	int64_t rc = scm(7, 1, PAS_GPU, 0, 0, &r1);		/* PAS_IS_SUPPORTED */
 	log_printf("zap: pas supported(13) rc %ld r1 %lx\n", (long)rc, r1);
@@ -765,7 +783,7 @@ static void zap_load(void (*save)(const char *))
 	if (rc || r1)
 		return;
 
-	rc = scm(2, 3, PAS_GPU, ZAP_REGION, ZAP_SIZE, &r1);	/* MEM_SETUP */
+	rc = scm(2, 3, PAS_GPU, zap_region, zap_size, &r1);	/* MEM_SETUP */
 	log_printf("zap: mem setup rc %ld r1 %lx\n", (long)rc, r1);
 	save("zap: mem setup");
 	if (rc || r1)
@@ -773,9 +791,9 @@ static void zap_load(void (*save)(const char *))
 
 	/* Relocatable: the one LOAD segment (paddr 0x5000, the lowest) at the region base. */
 	uint32_t slen = (uint32_t)(zap_b02_end - zap_b02);
-	for (uint32_t o = 0; o < ZAP_SIZE; o += 4)
-		wr32(ZAP_REGION + o, 0);
-	copy_in(ZAP_REGION, zap_b02, slen);
+	for (uint32_t o = 0; o < zap_size; o += 4)
+		wr32(zap_region + o, 0);
+	copy_in(zap_region, zap_b02, slen);
 	__asm__ volatile("dsb sy" ::: "memory");
 	save("zap: segment copied");
 
@@ -845,7 +863,7 @@ static int flush_wait(const char *what)
 #define FB_PA		0x9c000000UL
 #define FB_STRIDE	5760
 #define FB_W		1440
-#define BAND_Y		700
+#define BAND_Y		2500		/* below the console text area (rows 0..70) */
 #define BAND_H		600
 
 /*
@@ -855,7 +873,7 @@ static int flush_wait(const char *what)
  */
 static void gpu_paint(void (*save)(const char *), uintptr_t c)
 {
-	for (int i = 0; i < 5; i++)	/* 10 MB as 2 MB blocks, AP=01, NC */
+	for (int i = 0; i < 9; i++)	/* 18 MB as 2 MB blocks: covers the 3120-row panel */
 		wr64(GT_L2 + 8 * (((GVA_FB >> 21) & 0x1ff) + i),
 		     (FB_PA + 0x200000UL * i) | (1u << 10) | (3u << 8) | (1u << 6) | 1u);
 	wr32(c + 0x618, 0);		/* CB TLBIALL */

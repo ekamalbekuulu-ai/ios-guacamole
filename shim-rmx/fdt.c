@@ -82,3 +82,57 @@ int fdt_chosen_u64(uintptr_t fdt, const char *prop, uint64_t *out)
 		}
 	}
 }
+
+/*
+ * ABL rewrites the PIL carve-outs at boot: the static DTB in boot.img says
+ * pil_gpu_region = 0x98715000, but the tree the bootloader actually hands us
+ * can place it 4 MiB higher (0x98b15000), in step with every other pil_*
+ * region. Hard-coding either value is a coin flip, so read the live tree.
+ */
+int fdt_node_reg64(uintptr_t fdt, const char *name, uint64_t *addr, uint64_t *size)
+{
+	if (!fdt || be32(fdt) != FDT_MAGIC)
+		return 0;
+	uintptr_t p = fdt + be32(fdt + 8);
+	uintptr_t strings = fdt + be32(fdt + 12);
+	int depth = 0, target = 0;
+
+	for (;;) {
+		uint32_t tok = be32(p);
+		p += 4;
+		switch (tok) {
+		case FDT_BEGIN_NODE: {
+			const char *nm = (const char *)p;
+			depth++;
+			target = depth >= 2 && streq(nm, name);
+			p = align4(skip_str(p));
+			break;
+		}
+		case FDT_END_NODE:
+			target = 0;
+			depth--;
+			break;
+		case FDT_PROP: {
+			uint32_t len = be32(p), nameoff = be32(p + 4);
+			uintptr_t val = p + 8;
+			if (target && len >= 8 &&
+			    streq((const char *)(strings + nameoff), "reg")) {
+				if (len >= 16) {	/* #address-cells 2, #size-cells 2 */
+					*addr = (uint64_t)be32(val) << 32 | be32(val + 4);
+					*size = (uint64_t)be32(val + 8) << 32 | be32(val + 12);
+				} else {		/* 1/1 */
+					*addr = be32(val);
+					*size = be32(val + 4);
+				}
+				return 1;
+			}
+			p = align4(val + len);
+			break;
+		}
+		case FDT_NOP:
+			break;
+		default:
+			return 0;
+		}
+	}
+}

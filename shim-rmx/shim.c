@@ -98,6 +98,45 @@ static void save_log(const char *why)
 	}
 }
 
+#ifdef SHIM_GPUPROBE
+/*
+ * Live view of the probe: after every stage marker, redraw the tail of the
+ * log on the splash framebuffer. A hang then leaves the last completed stage
+ * on screen, which is the only evidence available without UFS or USB.
+ * Rows above PROBE_TEXT_ROWS stay untouched so the GPU paint band survives.
+ */
+#define PROBE_TEXT_ROWS	70
+static int probe_con;
+
+static void probe_draw(void)
+{
+	if (!probe_con)
+		return;
+	int rows = con_rows();
+	if (rows > PROBE_TEXT_ROWS)
+		rows = PROBE_TEXT_ROWS;
+	/* ~80 chars per row at 1440x3120 with the 2x font: keep a margin so the
+	 * tail is never cut by con_text() reaching the row limit. */
+	unsigned cap = (unsigned)rows * 80u;
+	uint32_t s = log_len > cap ? log_len - cap : 0;
+	while (s < log_len && log_buf[s] != '\n')
+		s++;
+	if (s < log_len)
+		s++;
+	con_home();
+	con_text(log_buf + s, log_len - s, WHITE);
+	if (con_row() < rows)
+		con_clear_range(con_row(), rows, 0xff000000);
+	con_home();
+}
+
+static void probe_save(const char *why)
+{
+	save_log(why);
+	probe_draw();
+}
+#endif
+
 /* Next boot goes to fastboot: PMIC PON reason (what ABL reads) plus the IMEM cookie. */
 static void set_reboot_bootloader(void)
 {
@@ -389,7 +428,16 @@ void shim_main(uintptr_t dtb)
 	}
 	reset();
 #endif
+#if defined(SHIM_GPUPROBE) && !defined(SHIM_SHOWLOG)
+	/* OnePlus 7 Pro: ABL leaves the UFS host gated and the first register read
+	 * hangs the bus (that is why the working board file sets PROBE_UFS 0). If
+	 * that happened here it would be before wdt_arm(), so the phone would just
+	 * sit there with nothing on screen and no log. Probe without UFS.
+	 * The SHIM_SHOWLOG variant exists to read the log back, so it keeps UFS. */
+	ufs_ok = 0;
+#else
 	ufs_ok = !ufs_init();
+#endif
 #ifdef SHIM_READONLY
 	ramlog_rescue_readonly();
 #else
@@ -415,10 +463,19 @@ void shim_main(uintptr_t dtb)
 	reset();
 #endif
 #ifdef SHIM_GPUPROBE
-	wdt_arm(20);	/* a hung GPU register access resets the phone */
-	gpuprobe_run(save_log);
-	save_log("gpuprobe done");
-	reset();
+	/* The only observability channel on this board without UFS: draw on the
+	 * splash framebuffer ABL keeps scanning out, and stop there so the log can
+	 * be read off the screen. */
+	probe_con = !con_init(FB_SPLASH_BASE, FB_W * 4);
+	if (probe_con)
+		con_clear(0xff000000);
+	gpuprobe_set_dtb(dtb);
+	wdt_arm(60);	/* a hung GPU register access still resets the phone */
+	probe_save("gpu: start");
+	gpuprobe_run(probe_save);
+	probe_save("gpuprobe done");
+	for (;;)	/* leave the log on screen */
+		__asm__ volatile("wfe");
 #endif
 #ifdef SHIM_DISPTEST
 	sde_probe();

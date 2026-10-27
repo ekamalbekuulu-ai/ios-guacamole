@@ -92,6 +92,25 @@ int con_rows(void)
 	return (FB_H - TOP) / CH_H;
 }
 
+int con_row(void)
+{
+	return row;
+}
+
+/* Clear rows [r0, r1) to bg; anything outside that band is left alone. */
+void con_clear_range(int r0, int r1, uint32_t bg)
+{
+	if (!con_fb)
+		return;
+	if (r0 < 0)
+		r0 = 0;
+	for (int y = TOP + r0 * CH_H; y < TOP + r1 * CH_H && y < FB_H; y++) {
+		volatile uint32_t *line = con_fb + y * con_stride;
+		for (int x = 0; x < FB_W; x++)
+			line[x] = bg;
+	}
+}
+
 /*
  * Wrapped text from the current row down; returns how many bytes of s fit.
  * Non-printable bytes show as '?', tabs as one space, "\r" is dropped.
