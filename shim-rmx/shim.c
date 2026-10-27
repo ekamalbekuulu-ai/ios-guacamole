@@ -474,6 +474,9 @@ void shim_main(uintptr_t dtb)
 	probe_save("gpu: start");
 	gpuprobe_run(probe_save);
 	probe_save("gpuprobe done");
+	/* Success: disarm the watchdog so the log stays on screen until someone
+	 * photographs it (a hang still trips the 60 s watchdog armed above). */
+	wdt_off();
 	for (;;)	/* leave the log on screen */
 		__asm__ volatile("wfe");
 #endif
