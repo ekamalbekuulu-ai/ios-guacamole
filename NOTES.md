@@ -1156,3 +1156,24 @@ Next moves (in order of value):
 2. GPU: find why `memnoc_gfx`/`snoc_dvm` stay halted with both GDSCs reporting PWR_ON — this is
    the gate in front of the RSCC writes. Read `gpucc-sm8150.c` GDSC `cx_gdsc`/`gx_gdsc` and the
    `GPU_CC_CX_BCR`/`GPU_CC_GMU_BCR` release order next.
+
+### PC environment survey (2026-10-27 late) - do not hunt for this again
+- `adb` / `fastboot` are already on PATH: `C:\Android\adb.exe`, `C:\Android\fastboot.exe`.
+- `C:\Users\kssszz666\Desktop\一加7Pro救砖包[安卓10]\` holds the OnePlus 9008 driver, TWRP and
+  `MsmDownloadTool V4.0.exe` + `guacamole_21_H.23_200103.ops` (5.7 GB installer container; the
+  firehose programmer is **not** reachable inside it - the .ops is only the outer package).
+- `C:\Program Files (x86)\搞机助手\` ships `Edlstart.exe` / `Edlrest.exe` / `DSAPI.dll` /
+  `DSControls.dll`: a ready-made 9008 channel that can enter/leave EDL, and its GUI can read or
+  back up partitions. **This is the cheapest route to the ring log**: dump the last 4 MB of
+  `userdata` and decode it with `ios-guacamole-main/tools/sweet-log.py`.
+- Python 3.12 with pyusb + libusb (via `libusb-package`) installed; `tools/edl/` has bkerler/edl
+  but it still needs a **OnePlus-signed** `prog_firehose_ddr.elf`. The generic SDM855 loaders from
+  `bkerler/Loaders` are not accepted by OnePlus secure boot (untested, but expected to fail).
+
+### State of the two open problems
+- GPU: `RSCC_RSC_STATUS0_DRV0` write still wedges the SoC into EDL, with and without the
+  `gpll0`/`gpll0_out_even` gates. `memnoc_gfx`/`snoc_dvm` remain `(still halted)` while both GDSCs
+  report PWR_ON, so the missing door is in the GPUCC GDSC/BCR domain, not in GCC.
+- USB: gadget attaches with `vbus=3` (`DEVICE_DESCRIPTOR_FAILURE`) but no DWC3 event is ever seen;
+  `sweetusbdma` (low DMA) panics in host code (`Unaligned kernel data abort`).
+- Working images: `work\gpu\shim-boot-usable.img` (iOS usable, `sweetgpu=0 sweetusb=0 sweetfb_fill=1`).
