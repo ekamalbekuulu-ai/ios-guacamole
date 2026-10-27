@@ -1,0 +1,103 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -92,6 +92,18 @@
+ #define GPUCC_RCG_CMD		0x1120u
+ #define GPUCC_CX_GMU_CLK	0x1098u
+ #define GPUCC_GX_GMU_CLK	0x1064u
++/*
++ * The CX-side branches the RSCC/PDC sit behind, from the vendor clock driver
++ * (gpucc-sm8150.c): gpu_cc_cx_apb_clk 0x1088, gpu_cc_cx_snoc_dvm_clk 0x108c,
++ * gpu_cc_cxo_aon_clk 0x1004, gpu_cc_crc_ahb_clk 0x107c. None of these were
++ * ever enabled here, and a write to an APB block whose APB clock is gated
++ * wedges the NoC while a read can still be answered - exactly the "reads are
++ * fine, every write lands in EDL" behaviour seen with RSCC_RSC_STATUS0.
++ */
++#define GPUCC_CX_APB_CLK	0x1088u
++#define GPUCC_CX_SNOC_DVM_CLK	0x108cu
++#define GPUCC_CXO_AON_CLK	0x1004u
++#define GPUCC_CRC_AHB_CLK	0x107cu
+ #define GPUCC_GX_CFG_GDSCR	0x1010u		/* BIT(16) GX power up */
+ #define GPUCC_CX_HW_CTRL	0x1540u		/* BIT(31) = CX on */
+ 
+@@ -206,6 +218,8 @@
+ #define SMMU_PTE_BLOCK_ATTR	(1u | (1u << 10) | (3u << 8) | (1u << 2))
+ #define SMMU_PTE_TABLE		0x3u
+ 
++static bool gpu_cx_ready;	/* the CX-side branches the RSCC needs */
++
+ static uint32_t
+ gpu_rd(vm_offset_t base, uint32_t off)
+ {
+@@ -241,6 +255,48 @@
+ 	uint32_t after = gpu_rd(gcc, off);
+ 	printf("SWEET GPU: %s %#x -> %#x%s\n", name, before, after,
+ 	    gpu_clk_on(after) ? "" : " (still halted)");
++}
++
++/*
++ * Ported from the K90/HackiOS driver's "prove the block answers, then write"
++ * discipline (adreno8_cx.c: adreno8_clock_on/adreno8_gpucc_answers): every
++ * branch is enabled, read back and reported, and a required one that stays
++ * halted aborts the caller instead of letting it write into a gated block.
++ */
++static bool
++gpu_cx_side_clocks(vm_offset_t gpucc)
++{
++	static const struct {
++		const char *name;
++		uint32_t    off;
++		bool        must;
++	} clks[] = {
++		{ "gpu_cc_cx_apb_clk",      GPUCC_CX_APB_CLK,      true  },
++		{ "gpu_cc_cx_snoc_dvm_clk", GPUCC_CX_SNOC_DVM_CLK, true  },
++		{ "gpu_cc_cxo_aon_clk",     GPUCC_CXO_AON_CLK,     true  },
++		{ "gpu_cc_crc_ahb_clk",     GPUCC_CRC_AHB_CLK,     false },
++	};
++	bool ok = true;
++
++	for (unsigned i = 0; i < sizeof(clks) / sizeof(clks[0]); ++i) {
++		uint32_t before = gpu_rd(gpucc, clks[i].off);
++		uint32_t after;
++		bool on;
++
++		gpu_wr(gpucc, clks[i].off, before | 1u);
++		after = gpu_rd(gpucc, clks[i].off);
++		for (unsigned k = 0; k < 100 && !gpu_clk_on(after); ++k) {
++			delay(10);
++			after = gpu_rd(gpucc, clks[i].off);
++		}
++		on = gpu_clk_on(after);
++		printf("SWEET GPU: %-24s %#010x -> %#010x (%s)\n",
++		    clks[i].name, before, after, on ? "on" : "STILL HALTED");
++		if (!on && clks[i].must) {
++			ok = false;
++		}
++	}
++	return ok;
+ }
+ 
+ /*
+@@ -851,6 +907,10 @@
+ 	}
+ 
+ 	gpu_wr(gmu, GMU_GENERAL_7, 1);
++	if (!gpu_cx_ready) {
++		printf("SWEET GPU: rpmh/RSCC skipped (CX clocks not proven on)\n");
++		return;
++	}
+ 	rscc = gpu_rpmh_init();
+ 	/*
+ 	 * The CONTROL_REQ/ACK handshake is the wake-from-slumber path; a cold
+@@ -1182,6 +1242,11 @@
+ 	if (stage >= 2 && gpu_power_cx(gpucc)) {
+ 		gpu_enable_branch(gpucc, GPUCC_AHB_CLK, "gpu_cc_ahb_clk");
+ 		gpu_enable_branch(gpucc, GPUCC_CXO_CLK, "gpu_cc_cxo_clk");
++		gpu_cx_ready = gpu_cx_side_clocks(gpucc);
++		if (!gpu_cx_ready) {
++			printf("SWEET GPU: a required CX clock is still gated; "
++			    "RSCC/PDC writes will be skipped (a write there would wedge the NoC)\n");
++		}
+ 		if (gpu_clk_on(gpu_rd(gpucc, GPUCC_AHB_CLK))) {
+ 			gpu_probe_core();
+ 			if (stage >= 3) {
