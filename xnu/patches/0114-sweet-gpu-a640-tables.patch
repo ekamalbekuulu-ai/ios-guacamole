@@ -9,7 +9,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  extern void sweet_rpmh_arc_dump(void);
-@@ -335,6 +336,44 @@
+@@ -335,6 +336,42 @@
  }
  
  /* Read-only liveness dump; a driver never writes these registers. */
@@ -18,7 +18,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 + * from the Linux a640_hwcg[] register/value pairs). Ported in the shape of the
 + * K90/HackiOS driver's gpu_hwcg() (adreno8_gpu.c): write one entry, read it
 + * back, and stop at the first mismatch instead of continuing into a register
-+ * block whose state is no longer known. A caller must have GX powered.
++ * block whose state is no longer known. The caller must have GX powered.
 + */
 +static int
 +gpu_apply_hwcg(void)
@@ -27,11 +27,9 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 +	int applied = 0;
 +
 +	if (gpu == 0) {
-+		printf("SWEET GPU: hwcg: GPU block map failed
-+");
++		printf("SWEET GPU: hwcg: GPU block map failed\n");
 +		return -1;
 +	}
-+
 +	for (unsigned i = 0; i < SWEET_A640_HWCG_COUNT; ++i) {
 +		uint32_t off = sweet_a640_hwcg[i].off;
 +		uint32_t want = sweet_a640_hwcg[i].val;
@@ -54,7 +52,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  static void
  gpu_probe_core(void)
  {
-@@ -1272,6 +1311,14 @@
+@@ -1272,6 +1309,14 @@
  						if (stage >= 6) {
  							gpu_probe_smmu();
  						}
@@ -69,7 +67,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  						if (stage >= 7) {
  							gpu_boot_gmu(gpucc, gcc);
  						}
-@@ -1292,6 +1339,27 @@
+@@ -1292,6 +1337,25 @@
  			}
  		} else {
  			printf("SWEET GPU: GPUCC AHB is gated; skipping GPU core reads\n");
@@ -80,8 +78,6 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 +		(void)PE_parse_boot_argn("sweetgpu_tables", &show_tables,
 +		    sizeof(show_tables));
 +		if (show_tables) {
-+			/* Nothing is written: this only proves the generated a640
-+			 * tables reached the kernel and shows their ends. */
 +			printf("SWEET GPU: tables hwcg=%u protect=%u\n",
 +			    SWEET_A640_HWCG_COUNT, SWEET_A640_PROTECT_COUNT);
 +			printf("SWEET GPU: hwcg[0] %#x=%#x hwcg[last] %#x=%#x\n",
