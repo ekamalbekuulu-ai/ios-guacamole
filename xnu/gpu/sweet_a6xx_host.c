@@ -47,6 +47,7 @@ extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, u
 extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
 extern void thread_deallocate(thread_t);
 extern kern_return_t thread_terminate(thread_t);
+extern int hz;		/* kern/clock.c; tsleep ticks, not in every header set */
 extern int vprintf(const char *fmt, va_list ap);
 
 void sweet_a6xx_init(void);
