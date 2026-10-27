@@ -2212,3 +2212,50 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	sweet_gpu_init();	/* no-op unless sweetgpu=N is on the command line */
  #endif
  	return 0;
+diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -28,6 +28,7 @@
+ public:
+ 	IOService *probe(IOService *provider, SInt32 *score) APPLE_KEXT_OVERRIDE;
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn newUserClient(task_t, void *, UInt32, OSDictionary *, IOUserClient **) APPLE_KEXT_OVERRIDE;
+ };
+ 
+ OSDefineMetaClassAndStructors(SweetAccelerator, IOAcceleratorES);
+diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -54,5 +54,32 @@
+ 	IOLog("SWEET MTL: IOAcceleratorES published (MetalPluginName SweetMetal)\n");
+ 	return true;
+ }
++
++/* The user client lives in bsd/dev/sweet_accel_client.cpp. */
++extern "C" IOService *sweet_accel_create_user_client(IOService *provider);
++
++IOReturn
++SweetAccelerator::newUserClient(task_t owningTask, void *securityID, UInt32 type,
++    OSDictionary *properties, IOUserClient **handler)
++{
++	(void)owningTask;
++	(void)securityID;
++	(void)type;
++	(void)properties;
++	if (handler == NULL) {
++		return kIOReturnBadArgument;
++	}
++	IOService *client = sweet_accel_create_user_client(this);
++	if (client == NULL) {
++		return kIOReturnNoMemory;
++	}
++	IOUserClient *uc = OSDynamicCast(IOUserClient, client);
++	if (uc == NULL) {
++		client->release();
++		return kIOReturnError;
++	}
++	*handler = uc;
++	return kIOReturnSuccess;
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+ 
