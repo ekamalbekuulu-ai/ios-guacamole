@@ -1,8 +1,8 @@
-sweet-logdump: also dump our own SWEET lines from the previous boot
+sweet-logdump: also dump our own lines from the previous boot
 
-Without this the ring dump hides every driver line (its filter only keeps
-crashes and daemon failures), so a silent overlay/Metal failure leaves no
-evidence anywhere.
+The ring dump filter only keeps crashes and daemon failures, so a silent
+overlay or Metal failure leaves no evidence anywhere. Add the kernel's
+"SWEET " prefix plus the userspace driver's "SweetAccel"/"template " lines.
 
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
@@ -12,7 +12,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  {
  	static const char * const keys[] = {
 -		"CRASH ", "exited", "Exit", "failed", "Failed", "error", "Error",
-+		"CRASH ", "SWEET ", "exited", "Exit", "failed", "Failed", "error", "Error",
++		"CRASH ", "SWEET ", "SweetAccel", "template ", "exited", "Exit", "failed", "Failed", "error", "Error",
  		"panic", "SpringBoard", "xpcproxy", "fairplayd", "bluetoothd",
  		"watchdog", "boot task", "mount", "fsck", "keybag", "AMFI", "abort",
  		"timeout", "Timeout", "not found", "No such",
