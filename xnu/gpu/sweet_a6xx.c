@@ -737,8 +737,7 @@ static int zap_load(struct a6_gpu *g)
 	 */
 	uint64_t meta_pa = zap_region;
 	a6_write(meta_pa, mdt, mlen);
-	a6_log("zap: meta %llx len %u (pool %llx low)
-", (unsigned long long)meta_pa,
+	a6_log("zap: meta %llx len %u (pool %llx low)\n", (unsigned long long)meta_pa,
 	    mlen, (unsigned long long)a6_pool_pa(g, A6_OFF_ZAP_META));
 	int64_t rc = scm(1, 2 | (2u << 6), PAS_GPU, meta_pa, 0, &r1);
 	if (rc || r1) {
