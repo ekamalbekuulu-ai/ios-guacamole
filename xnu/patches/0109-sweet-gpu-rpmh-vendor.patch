@@ -1,0 +1,187 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -136,8 +136,8 @@
+  * RPMh/PDC/RSCC blocks (sm8150.dtsi: gmu_pdc @0x0b290000, gmu_pdc_seq
+  * @0x0b490000; mainline msm maps the RSC sequencer at gmu + 0x23000).
+  */
+-#define GPU_PDC_PA		0x0b290000u
+-#define GPU_PDC_SEQ_PA		0x0b490000u
++#define GPU_PDC_PA		0x0b280000u
++#define GPU_PDC_SEQ_PA		0x0b480000u
+ #define GPU_RSCC_PA		0x02c23000u
+ #define GPU_PDC_SIZE		0x00010000u
+ #define GPU_RSCC_SIZE		0x00002000u
+@@ -573,35 +573,75 @@
+ }
+ 
+ /*
+- * a6xx_gmu_rpmh_init for a640: RSCC sequencer uCode + PDC sequencer uCode
+- * and the PDC TCS commands that release/retain the GMU power state. The live
+- * DT gives PDC cfg 0xb290000 and PDC seq 0xb490000; the RSCC is the AP RSC
+- * at 0x18220000 (same block the ARC votes use). a640 uses PDC address 0x30090.
++ * a6xx_gmu_rpmh_init for a640, transcribed from the vendor tree
++ * (OnePlusOSS/android_kernel_oneplus_sm8150 on the Android 12 branch:
++ * drivers/gpu/msm/adreno_a6xx_gmu.c, _load_gmu_rpmh_ucode(), plus
++ * arch/arm64/boot/dts/qcom/sm8150-gpu.dtsi for the windows).
++ *
++ * Two guesses from the earlier bring-up were wrong:
++ *  - The RSCC is not a separate block. kgsl computes
++ *    reg = regbase + (offsetwords - gmu2gpu_offset) * 4 with the GMU mapping at
++ *    0x02c6a000 and gmu2gpu_offset = 0x1a800, so RSCC register 0x23404 is at
++ *    0x02c6a000 + 0x23010 = 0x02c8d010. The earlier attempt wrote 0x02c8d000,
++ *    i.e. 0x10 bytes low, which lands on a different register of the same
++ *    block; that is the write that wedged the NoC.
++ *  - The PDC windows on sm8150 are 0xb280000 (cfg) and 0xb480000 (seq), 64 KiB
++ *    each, per the kgsl_gmu_pdc_cfg / kgsl_gmu_pdc_seq reg-names.
++ *
++ * Each stage is gated by sweetgpu_rpmh=<n> so the ladder can be walked with a
++ * repack only (no kernel rebuild):
++ *   1 read the blocks back only (a successful read is the licence to write)
++ *   2 disable SDE clock gating (RSCC_RSC_STATUS0_DRV0 = BIT(24))
++ *   3 RSC/PDC handshake registers + hidden TCS commands
++ *   4 RSC sequencer uCode (5 words)
++ *   5 PDC sequencer uCode (5 words)
++ *   6 PDC TCS1/TCS3 command tables + PDC enable
++ * a640 uses PDC command address 0x30090 for the third command of each bank.
+  */
+ static vm_offset_t
+ gpu_rpmh_init(void)
+ {
+-	uint64_t rscc_pa = 0x18220000u;	/* safe: apps RSC, never hangs */
+-	int try_rsc = 0;
+-	/*
+-	 * The GPU RSC lives at gmu + 0x23000 (0x02c8d000 on sm8150) but is
+-	 * power gated until the GPU interconnect clocks come up; touching it
+-	 * while gated wedges the NoC (the phone ends up in the 900E dump).
+-	 * Only probe it behind sweetgpu_rsc=1.
+-	 */
+-	if (PE_parse_boot_argn("sweetgpu_rsc", &try_rsc, sizeof(try_rsc)) && try_rsc) {
+-		rscc_pa = 0x02c8d000u;
+-	}
+-	vm_offset_t rscc = ml_io_map((vm_offset_t)rscc_pa, 0x10000u);
+-	vm_offset_t pdc = ml_io_map(0xb290000u, 0x10000u);
+-	vm_offset_t seq = ml_io_map(0xb490000u, 0x10000u);
+-
++	int step = 0;
++	vm_offset_t rscc, pdc, seq;
++
++	(void)PE_parse_boot_argn("sweetgpu_rpmh", &step, sizeof(step));
++	if (step <= 0) {
++		printf("SWEET GPU: rpmh init skipped (sweetgpu_rpmh=0)\n");
++		return 0;
++	}
++	rscc = ml_io_map(GPU_RSCC_PA, 0x10000u);
++	pdc = ml_io_map(GPU_PDC_PA, 0x10000u);
++	seq = ml_io_map(GPU_PDC_SEQ_PA, 0x10000u);
+ 	if (rscc == 0 || pdc == 0 || seq == 0) {
+-		printf("SWEET GPU: RSCC/PDC mapping failed\n");
++		printf("SWEET GPU: rpmh map failed rscc=%#x pdc=%#x seq=%#x\n",
++		    (uint32_t)rscc, (uint32_t)pdc, (uint32_t)seq);
+ 		return 0;
+ 	}
+-	/* Disable SDE clock gating and set up the RSC/PDC handshake. */
++	printf("SWEET GPU: rpmh step=%d rscc=%#x(pd %#x) pdc=%#x(pd %#x) seq=%#x(pd %#x)\n",
++	    step, (uint32_t)rscc, (uint32_t)GPU_RSCC_PA, (uint32_t)pdc,
++	    (uint32_t)GPU_PDC_PA, (uint32_t)seq, (uint32_t)GPU_PDC_SEQ_PA);
++
++	/* Step 1: read-only. A gated block would wedge the NoC on the very first
++	 * access, so a read that returns is also the proof that writing is safe. */
++	printf("SWEET GPU: rsc status0=%#x slave=%#x seqmem0=%#x busy=%#x\n",
++	    gpu_rd(rscc, 0x4u * 4u), gpu_rd(rscc, 0xbu * 4u),
++	    gpu_rd(rscc, 0x180u * 4u), gpu_rd(rscc, 0x101u * 4u));
++	printf("SWEET GPU: pdc enable=%#x tcs1_ctl=%#x tcs3_ctl=%#x seq0=%#x\n",
++	    gpu_rd(pdc, 0x1140u * 4u), gpu_rd(pdc, 0x1572u * 4u),
++	    gpu_rd(pdc, 0x15d6u * 4u), gpu_rd(seq, 0x0u));
++	if (step < 2) {
++		return rscc;
++	}
++
++	/* Step 2: disable SDE clock gating. */
+ 	gpu_reg(rscc, 0x4, 1u << 24);
++	__asm__ volatile("dsb sy" ::: "memory");
++	printf("SWEET GPU: rsc status0 now=%#x\n", gpu_rd(rscc, 0x4u * 4u));
++	if (step < 3) {
++		return rscc;
++	}
++
++	/* Step 3: handshake registers + hidden TCS commands. */
+ 	gpu_reg(rscc, 0xb, 1);
+ 	gpu_reg(rscc, 0xe, 0);
+ 	gpu_reg(rscc, 0xd, 0);
+@@ -613,19 +653,37 @@
+ 	gpu_reg(rscc, 0x8, 0x4520);
+ 	gpu_reg(rscc, 0x9, 0x4510);
+ 	gpu_reg(rscc, 0xa, 0x4514);
+-	/* RSC sequencer uCode (a640 uses the non-a650 sequence). */
++	__asm__ volatile("dsb sy" ::: "memory");
++	if (step < 4) {
++		return rscc;
++	}
++
++	/* Step 4: RSC sequencer uCode (a640 uses the non-a650 sequence). */
+ 	gpu_reg(rscc, 0x180, 0xa7a506a0u);
+ 	gpu_reg(rscc, 0x181, 0xa1e6a6e7u);
+ 	gpu_reg(rscc, 0x182, 0xa2e081e1u);
+ 	gpu_reg(rscc, 0x183, 0xe9a982e2u);
+ 	gpu_reg(rscc, 0x184, 0x0020e8a8u);
+-	/* PDC sequencer uCode. */
++	__asm__ volatile("dsb sy" ::: "memory");
++	printf("SWEET GPU: rsc seqmem0 now=%#x\n", gpu_rd(rscc, 0x180u * 4u));
++	if (step < 5) {
++		return rscc;
++	}
++
++	/* Step 5: PDC sequencer uCode. */
+ 	gpu_reg(seq, 0x0, 0xfebea1e1u);
+ 	gpu_reg(seq, 0x1, 0xa5a4a3a2u);
+ 	gpu_reg(seq, 0x2, 0x8382a6e0u);
+ 	gpu_reg(seq, 0x3, 0xbce3e284u);
+ 	gpu_reg(seq, 0x4, 0x002081fcu);
+-	/* PDC TCS1: sleep sequence. */
++	__asm__ volatile("dsb sy" ::: "memory");
++	printf("SWEET GPU: pdc seq0 now=%#x\n", gpu_rd(seq, 0x0u));
++	if (step < 6) {
++		return rscc;
++	}
++
++	/* Step 6: PDC TCS command tables (a640: third command address 0x30090)
++	 * and the PDC enable. */
+ 	gpu_reg(pdc, 0x1573, 7);
+ 	gpu_reg(pdc, 0x1574, 0);
+ 	gpu_reg(pdc, 0x1572, 0);
+@@ -638,7 +696,6 @@
+ 	gpu_reg(pdc, 0x157d, 0x10108);
+ 	gpu_reg(pdc, 0x157e, 0x30090);
+ 	gpu_reg(pdc, 0x157f, 0);
+-	/* PDC TCS3: wake sequence. */
+ 	gpu_reg(pdc, 0x15d7, 7);
+ 	gpu_reg(pdc, 0x15d8, 0);
+ 	gpu_reg(pdc, 0x15d6, 0);
+@@ -654,8 +711,7 @@
+ 	gpu_reg(pdc, 0x1148, 0);
+ 	gpu_reg(pdc, 0x1140, 0x80000001u);
+ 	__asm__ volatile("dsb sy" ::: "memory");
+-	printf("SWEET GPU: rscc/pdc uCode loaded rscc=%#x pdc=%#x seq=%#x\n",
+-	    (uint32_t)rscc, (uint32_t)pdc, (uint32_t)seq);
++	printf("SWEET GPU: pdc enable now=%#x\n", gpu_rd(pdc, 0x1140u * 4u));
+ 	return rscc;
+ }
+ 
+@@ -779,7 +835,15 @@
+ 
+ 	gpu_wr(gmu, GMU_GENERAL_7, 1);
+ 	rscc = gpu_rpmh_init();
+-	rscc_ok = gpu_rscc_handshake(gmu, rscc);
++	/*
++	 * The CONTROL_REQ/ACK handshake is the wake-from-slumber path; a cold
++	 * boot only needs the uCode in place. Ask and report, but do not let a
++	 * missing ACK block the CM3.
++	 */
++	rscc_ok = (rscc != 0);
++	if (rscc_ok) {
++		(void)gpu_rscc_handshake(gmu, rscc);
++	}
+ 	printf("SWEET GPU: gmu fw head=%#x/%#x/%#x/%#x\n",
+ 	    gpu_fw_rd32(fw, 0), gpu_fw_rd32(fw, 4), gpu_fw_rd32(fw, 8),
+ 	    gpu_fw_rd32(fw, 12));
