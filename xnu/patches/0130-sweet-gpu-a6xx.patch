@@ -1206,7 +1206,7 @@ diff --git a/bsd/dev/sweet_a6xx_host.c b/bsd/dev/sweet_a6xx_host.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx_host.c
-@@ -0,0 +1,329 @@
+@@ -0,0 +1,491 @@
 +/*
 + * Kernel environment for the Adreno 640 core in sweet_a6xx.c.
 + *
@@ -1533,6 +1533,168 @@ new file mode 100644
 +sweet_a6xx_ready(void)
 +{
 +	return gpu_ready;
++}
++
++/* ======================================================================
++ * The layer the display and Metal talk to. Same API the flame/rmx1931 tree
++ * exposes (sweet_gpu_{ready,surface_slot,map_surface,present,panel_stride}):
++ * iOS hands us a swapped IOSurface's pages, we point GPU virtual addresses at
++ * them, and a 2D blit stream copies/scales the frame into the panel memory
++ * without the CPU touching a pixel.
++ *
++ * Panel: OnePlus 7 Pro, 1440x3120, framebuffer at 0x9c000000 (A6_FB_PA).
++ * ====================================================================== */
++
++#define SLOTS		4
++#define SLOT_IOVA(n)	(0x100000000ULL + 0x1000000ULL * (n))
++#define SLOT_MAX	0x1000000ULL
++#define SLOT_PAGES	1024
++#define IB_OFF		A6_OFF_FREE	/* the present IB lives in the pool */
++
++#define PANEL_W		1440
++#define PANEL_H		3120
++
++/* Set by present(): where the fitted frame landed, for the touch mapping. */
++int sweet_display_fit_x, sweet_display_fit_w;
++
++static struct {
++	uint64_t key;
++	uint64_t pages[SLOT_PAGES];
++	uint32_t npages, page_size;
++	uint64_t used;
++} slot[SLOTS];
++static uint64_t slot_clock;
++static uint64_t stat_frames, stat_clean_abs, stat_gpu_abs;
++
++bool
++sweet_gpu_ready(void)
++{
++	return gpu_ready;
++}
++
++int
++sweet_gpu_surface_slot(uint64_t key)
++{
++	for (int i = 0; i < SLOTS; i++) {
++		if (slot[i].key == key && slot[i].npages) {
++			slot[i].used = ++slot_clock;
++			return i;
++		}
++	}
++	return -1;
++}
++
++int
++sweet_gpu_map_surface(uint64_t key, const uint64_t *pages, uint32_t npages, uint32_t page_size)
++{
++	if (!gpu_ready || npages > SLOT_PAGES || (uint64_t)npages * page_size > SLOT_MAX) {
++		return -1;
++	}
++	int s = 0;
++	for (int i = 1; i < SLOTS; i++) {
++		if (slot[i].used < slot[s].used) {
++			s = i;
++		}
++	}
++	lck_mtx_lock(&sweet_a6xx_lock);
++	int rc = a6_map_pages(&gpu, SLOT_IOVA(s), pages, npages, page_size);
++	a6_tlb_flush(&gpu);
++	lck_mtx_unlock(&sweet_a6xx_lock);
++	if (rc) {
++		slot[s].npages = 0;
++		return -1;
++	}
++	memcpy(slot[s].pages, pages, npages * sizeof(uint64_t));
++	slot[s].npages = npages;
++	slot[s].page_size = page_size;
++	slot[s].key = key;
++	slot[s].used = ++slot_clock;
++	a6_log("surface %llx -> slot %d (%u pages of %u)\n", key, s, npages, page_size);
++	return s;
++}
++
++/*
++ * Blit a mapped surface, scaled to fit and centred, into the panel memory.
++ * The CPU rendered that surface through the cache, so clean its pages first.
++ * Returns 0 when the GPU finished; the caller falls back to its CPU copy.
++ */
++int
++sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch,
++    uint32_t fb_pitch, uint32_t *out_dx, uint32_t *out_dw)
++{
++	if (!gpu_ready || s < 0 || s >= SLOTS || !slot[s].npages ||
++	    (pitch & 63) || (fb_pitch & 63) || h == 0 || w == 0) {
++		return -1;
++	}
++	uint64_t t0 = mach_absolute_time();
++	for (uint32_t i = 0; i < slot[s].npages; i++) {
++		flush_dcache64((addr64_t)slot[s].pages[i], slot[s].page_size, TRUE);
++	}
++	uint64_t t1 = mach_absolute_time();
++
++	struct a6_blit b = {
++		.src_iova = SLOT_IOVA(s) + offset, .src_w = w, .src_h = h, .src_pitch = pitch,
++		.sw = w, .sh = h, .dst_iova = A6_GVA_FB, .dst_pitch = fb_pitch, .filter = true,
++	};
++	/* Fit the frame into the panel, keeping the aspect ratio. */
++	if ((uint64_t)w * PANEL_H <= (uint64_t)PANEL_W * h) {
++		b.dh = PANEL_H;
++		b.dw = (uint32_t)(((uint64_t)w * PANEL_H + h / 2) / h);
++	} else {
++		b.dw = PANEL_W;
++		b.dh = (uint32_t)(((uint64_t)h * PANEL_W + w / 2) / w);
++	}
++	b.dx = (PANEL_W - b.dw) / 2;
++	b.dy = (PANEL_H - b.dh) / 2;
++
++	static uint32_t dw[A6_BLIT_MAX_DW];
++	lck_mtx_lock(&sweet_a6xx_lock);
++	uint32_t n = a6_blit_ib(&gpu, &b, dw);
++	a6_write(a6_pool_pa(&gpu, IB_OFF), dw, 4ULL * n);
++	int rc = a6_submit_ib(&gpu, a6_pool_va(IB_OFF), n, 100);
++	if (rc) {
++		uint64_t far = 0;
++		uint32_t syn = 0, fsr = a6_fault_status(&gpu, &far, &syn);
++		a6_log("present: GPU timeout (fence %u, memory %u, smmu fsr %x far %llx); CPU copy stays\n",
++		    gpu.fence, a6_fence_read(&gpu), fsr, far);
++		(void)a6_clear_fault(&gpu);
++		gpu_ready = false;	/* stop trying, do not wedge the display */
++	}
++	lck_mtx_unlock(&sweet_a6xx_lock);
++
++	uint64_t t2 = mach_absolute_time();
++	stat_clean_abs += t1 - t0;
++	stat_gpu_abs += t2 - t1;
++	if ((++stat_frames % 300) == 0) {
++		uint64_t c = 0, g = 0;
++		absolutetime_to_nanoseconds(stat_clean_abs, &c);
++		absolutetime_to_nanoseconds(stat_gpu_abs, &g);
++		a6_log("present: %llu frames, avg clean %llu us, GPU blit %llu us\n", stat_frames,
++		    c / 1000 / 300, g / 1000 / 300);
++		stat_clean_abs = stat_gpu_abs = 0;
++	}
++	if (!rc) {
++		sweet_display_fit_x = (int)b.dx;
++		sweet_display_fit_w = (int)b.dw;
++	}
++	if (out_dx) {
++		*out_dx = b.dx;
++	}
++	if (out_dw) {
++		*out_dw = b.dw;
++	}
++	return rc;
++}
++
++/* The display engine reads the panel with this row pitch; tell the 2D engine. */
++void
++sweet_gpu_panel_stride(uint32_t stride)
++{
++	/* SSPP_VIG0/1 YSTRIDE0 on the SDE, then flush CTL0. */
++	a6_wr(0x0ae00000ULL + 0x5000 + 0x24, stride);
++	a6_wr(0x0ae00000ULL + 0x5000 + 0x2000 + 0x24, stride);
++	a6_wr(0x0ae00000ULL + 0x2000 + 0x18, 0x3);
++	a6_log("panel stride %u\n", stride);
 +}
 +
 +#endif /* ARM64_BOARD_CONFIG_GUACAMOLE */
