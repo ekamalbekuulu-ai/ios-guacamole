@@ -1258,7 +1258,7 @@ diff --git a/bsd/dev/sweet_a6xx_host.c b/bsd/dev/sweet_a6xx_host.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx_host.c
-@@ -0,0 +1,511 @@
+@@ -0,0 +1,688 @@
 +/*
 + * Kernel environment for the Adreno 640 core in sweet_a6xx.c.
 + *
@@ -1767,6 +1767,183 @@ new file mode 100644
 +	a6_wr(0x0ae00000ULL + 0x5000 + 0x2000 + 0x24, stride);
 +	a6_wr(0x0ae00000ULL + 0x2000 + 0x18, 0x3);
 +	a6_log("panel stride %u\n", stride);
++}
++
++/* ======================================================================
++ * GPU buffers and submission: what the Metal user client
++ * (iokit/Kernel/arm/SweetAccelerator.cpp, selectors 1..7) needs behind it.
++ *
++ * The contract is the flame/rmx1931 one, so their phone/metal driver works
++ * unmodified:
++ *   0 params      -> gpu_id, chip_id, ready
++ *   1 alloc(size) -> handle, gpu_va, size     (+ clientMemoryForType mmap)
++ *   2 free(handle)
++ *   3 import(surface id) -> handle, gpu_va, size
++ *   4 submit(va, dwords, timeout) -> fence
++ *   5 cache_flush(handle, off, len)
++ *   6 submit_async(va, dwords) -> fence
++ *   7 wait_fence(fence, timeout)
++ * ====================================================================== */
++
++#define A6_MAX_BO	256
++#define BO_VA_BASE	0x1000000000ULL	/* 64 GB: above the surface slots */
++
++struct a6_bo {
++	uint64_t gpu_va, size;
++	vm_offset_t kva;
++	uint32_t npages;
++	bool used;
++};
++
++static struct a6_bo bos[A6_MAX_BO];
++static uint64_t bo_next_va = BO_VA_BASE;
++
++int
++sweet_a6xx_bo_alloc(uint64_t size, uint64_t *out_handle, uint64_t *out_gpu_va, uint64_t *out_size)
++{
++	if (!gpu_ready || size == 0) {
++		return -1;
++	}
++	size = (size + (uint64_t)PAGE_MASK) & ~(uint64_t)PAGE_MASK;
++	int h = -1;
++	for (int i = 0; i < A6_MAX_BO; i++) {
++		if (!bos[i].used) {
++			h = i;
++			break;
++		}
++	}
++	if (h < 0) {
++		return -1;
++	}
++	vm_offset_t kva = 0;
++	if (kmem_alloc_contig(kernel_map, &kva, (vm_size_t)size, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		return -1;
++	}
++	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)kva);
++	if (pn == 0) {
++		kmem_free(kernel_map, kva, (vm_size_t)size);
++		return -1;
++	}
++	uint64_t va = bo_next_va;
++	bo_next_va += (size + 0xfffffULL) & ~0xfffffULL;
++
++	lck_mtx_lock(&sweet_a6xx_lock);
++	int rc = a6_map(&gpu, va, ptoa_64(pn), size);
++	if (!rc) {
++		a6_tlb_flush(&gpu);
++	}
++	lck_mtx_unlock(&sweet_a6xx_lock);
++	if (rc) {
++		kmem_free(kernel_map, kva, (vm_size_t)size);
++		return -1;
++	}
++	bos[h].gpu_va = va;
++	bos[h].size = size;
++	bos[h].kva = kva;
++	bos[h].npages = (uint32_t)(size >> PAGE_SHIFT);
++	bos[h].used = true;
++	*out_handle = (uint64_t)h;
++	*out_gpu_va = va;
++	*out_size = size;
++	return 0;
++}
++
++int
++sweet_a6xx_bo_free(uint64_t handle)
++{
++	if (handle >= A6_MAX_BO || !bos[handle].used) {
++		return -1;
++	}
++	struct a6_bo *b = &bos[handle];
++	/* No per-range unmap in the core: keep the GPU mapping until the arena is
++	 * reset. 39-bit VA space and 256 buffers make the leak irrelevant; the
++	 * IOSurface path (C++ side) uses the slot table, not this one. */
++	kmem_free(kernel_map, b->kva, (vm_size_t)b->size);
++	memset(b, 0, sizeof(*b));
++	return 0;
++}
++
++int
++sweet_a6xx_bo_info(uint64_t handle, vm_offset_t *kva, uint64_t *size)
++{
++	if (handle >= A6_MAX_BO || !bos[handle].used) {
++		return -1;
++	}
++	*kva = bos[handle].kva;
++	*size = bos[handle].size;
++	return 0;
++}
++
++/*
++ * Importing an IOSurface by id needs the surface's physical pages, which only
++ * the IOKit side can walk (SweetSurface::memory is an IOMemoryDescriptor, and
++ * this file is plain C). The C++ user client implements selector 3 on top of
++ * sweet_gpu_map_surface(); this stub keeps the symbol for code that links
++ * against both.
++ */
++int
++sweet_a6xx_surface_import(uint32_t surface_id, uint64_t *out_handle, uint64_t *out_gpu_va,
++    uint64_t *out_size)
++{
++	(void)surface_id;
++	(void)out_handle;
++	(void)out_gpu_va;
++	(void)out_size;
++	return -1;
++}
++
++int
++sweet_a6xx_submit(uint64_t ib_gpu_va, uint32_t dwords, uint32_t timeout_ms, uint32_t *out_fence)
++{
++	if (!gpu_ready || dwords == 0) {
++		return -1;
++	}
++	lck_mtx_lock(&sweet_a6xx_lock);
++	int rc = a6_submit_ib(&gpu, ib_gpu_va, dwords, timeout_ms);
++	if (out_fence) {
++		*out_fence = gpu.fence;
++	}
++	if (rc) {
++		uint64_t far = 0;
++		uint32_t syn = 0, fsr = a6_fault_status(&gpu, &far, &syn);
++		a6_log("submit: timeout (fence %u, memory %u, smmu fsr %x far %llx)\n",
++		    gpu.fence, a6_fence_read(&gpu), fsr, far);
++		(void)a6_clear_fault(&gpu);
++	}
++	lck_mtx_unlock(&sweet_a6xx_lock);
++	return rc;
++}
++
++int
++sweet_a6xx_wait_fence(uint32_t fence, uint32_t timeout_ms)
++{
++	uint32_t waited = 0;
++	while (waited <= timeout_ms) {
++		if (a6_fence_read(&gpu) >= fence) {
++			return 0;
++		}
++		a6_delay_ms(1);
++		waited++;
++	}
++	return -1;
++}
++
++int
++sweet_a6xx_bo_cache_flush(uint64_t handle, uint64_t offset, uint64_t len)
++{
++	if (handle >= A6_MAX_BO || !bos[handle].used) {
++		return -1;
++	}
++	struct a6_bo *b = &bos[handle];
++	if (offset >= b->size) {
++		return -1;
++	}
++	if (len > b->size - offset) {
++		len = b->size - offset;
++	}
++	flush_dcache64((addr64_t)(b->kva + offset), (unsigned)len, TRUE);
++	return 0;
 +}
 +
 +#endif /* ARM64_BOARD_CONFIG_GUACAMOLE */
