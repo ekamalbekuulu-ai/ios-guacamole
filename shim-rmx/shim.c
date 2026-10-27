@@ -49,7 +49,12 @@
 static int ufs_ok;
 static volatile int in_exception;
 
-#define PSTORE_PMSG_BASE	0xb7fc0000UL	/* RMX1931 ramoops pmsg-ramoops-0 (2 MiB) */
+/* RMX1931 keeps its pstore console in a 2 MiB ramoops region at 0xb7fc0000.
+ * OnePlus 7 Pro has no equivalent at that address, and this write happens
+ * before the UFS log is committed, so a fault here would lose the whole log.
+ * Off by default; the UFS scratch area is the log that matters. */
+#ifdef SHIM_PSTORE
+#define PSTORE_PMSG_BASE	0xb7fc0000UL
 #define PSTORE_PMSG_CAP		(0x200000UL - 12UL)
 #define PSTORE_MAGIC		0x43474244U	/* PERSISTENT_RAM_SIG */
 
@@ -65,6 +70,9 @@ static void pstore_save_log(void)
 	hdr[2] = n;
 	__asm__ volatile("dsb sy" ::: "memory");
 }
+#else
+static void pstore_save_log(void) { }
+#endif
 
 /* Header line, then the text; zero-padded to whole blocks. */
 static void save_log(const char *why)
@@ -359,7 +367,7 @@ static void save_before_jump(void)
 
 void shim_main(uintptr_t dtb)
 {
-	log_printf("RMX1931 SHIM probe v1 t=%lu\n", ticks_now());
+	log_printf("GUACAMOLE SHIM probe v2 t=%lu\n", ticks_now());
 	log_cpu(dtb);
 	int spmi_ok = !spmi_init();
 	if (spmi_ok) {

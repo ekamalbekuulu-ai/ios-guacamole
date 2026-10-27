@@ -72,6 +72,13 @@ static void gpu_run(void (*save)(const char *), int gmu_cb);
 
 void gpuprobe_run(void (*save)(const char *))
 {
+	/* Self-documenting: these are the board constants this probe runs with, so
+	 * the saved log proves which values were actually used on this device. */
+	log_printf("gpu: board guacamole chip 0x6040001 gpu %lx gpucc %lx smmu %lx gmu %lx\n",
+		   (uint64_t)GPU, (uint64_t)GPUCC, (uint64_t)SMMU, (uint64_t)GMU_REG(0));
+	log_printf("gpu: board pool %lx zap %lx/%lx fb %lx stride %x %dx%d\n",
+		   (uint64_t)GMEM, (uint64_t)ZAP_REGION, (uint64_t)ZAP_SIZE, (uint64_t)FB_PA,
+		   FB_STRIDE, FB_W, BAND_Y + BAND_H);
 	log_printf("gpu: before cx_gdsc %x gx_gdsc %x gmu_rcg %x/%x ahb %x cxo %x cx_gmu %x\n",
 		   rd32(GPUCC + GPUCC_CX_GDSCR), rd32(GPUCC + GPUCC_GX_GDSCR),
 		   rd32(GPUCC + GPUCC_GMU_RCG), rd32(GPUCC + GPUCC_GMU_RCG + 4),
@@ -711,7 +718,11 @@ static void gmu_hfi(void (*save)(const char *), int cb)
 /* ---- stage 4: zap shader through TrustZone PAS (qcom_scm + mdt_loader) ---- */
 
 #define PAS_GPU		13
-#define ZAP_REGION	0x9a915000UL	/* reserved-memory pil_gpu_region, 8K */
+/* OnePlus 7 Pro: /reserved-memory/pil_gpu_region = 0x98715000 + 0x2000 (no-map)
+ * from the stock DTB (boot_unpacked/dtb). RMX1931's 0x99515000 / flame's own
+ * value do not exist on this board: MEM_SETUP + AUTH_AND_RESET against the
+ * wrong region either fails silently or lets TZ clobber DRAM. */
+#define ZAP_REGION	0x98715000UL	/* reserved-memory pil_gpu_region, 8K */
 #define ZAP_SIZE	0x2000UL
 #define ZAP_META	(GMEM + 0xa0000)	/* metadata buffer TZ reads */
 #define SCM_PIL(cmd)	(0x42000000UL | (2u << 8) | (cmd))	/* SMC64 std call, SIP, svc PIL */
@@ -828,8 +839,12 @@ static int flush_wait(const char *what)
 }
 
 #define GVA_FB		0x20000000u
-#define FB_PA		0x9c400000UL
-#define FB_STRIDE	4320
+/* OnePlus 7 Pro: cont_splash_region = 0x9c000000 + 0x02400000 (36 MiB),
+ * 1440x3120, stride 5760, a8r8g8b8 (GUACAMOLE.md + stock DTB). flame's
+ * 0x9c400000/4320 points 4 MiB into the region with the wrong row pitch. */
+#define FB_PA		0x9c000000UL
+#define FB_STRIDE	5760
+#define FB_W		1440
 #define BAND_Y		700
 #define BAND_H		600
 
@@ -848,18 +863,18 @@ static void gpu_paint(void (*save)(const char *), uintptr_t c)
 	wait_bit(c + 0x7f4, 1, 0, 10);
 
 	uint32_t row = GVA_FB + BAND_Y * FB_STRIDE;
-	pkt7(0x3d, 2 + 1080);		/* CP_MEM_WRITE one row */
+	pkt7(0x3d, 2 + FB_W);		/* CP_MEM_WRITE one row */
 	ring(row);
 	ring(0);
-	for (uint32_t x = 0; x < 1080; x++) {
-		uint32_t r = x * 255 / 1079, b = 255 - r, g = (x / 60) % 2 ? 200 : 40;
+	for (uint32_t x = 0; x < FB_W; x++) {
+		uint32_t r = x * 255 / (FB_W - 1), b = 255 - r, g = (x / 60) % 2 ? 200 : 40;
 		ring(0xff000000 | (r << 16) | (g << 8) | b);
 	}
 	pkt7(0x26, 0);
 	flush_wait("paint row");
 	for (uint32_t y = 1; y < BAND_H; y++) {
 		pkt7(0x75, 5);		/* CP_MEMCPY dwords, src, dst */
-		ring(1080);
+		ring(FB_W);
 		ring(row);
 		ring(0);
 		ring(row + y * FB_STRIDE);
@@ -869,8 +884,8 @@ static void gpu_paint(void (*save)(const char *), uintptr_t c)
 	}
 	pkt7(0x26, 0);
 	flush_wait("paint done");
-	log_printf("gpu: painted %d rows at y %d; fb word %x\n", BAND_H, BAND_Y,
-		   rd32(FB_PA + (BAND_Y + BAND_H / 2) * FB_STRIDE + 540 * 4));
+	log_printf("gpu: painted %d rows of %d px at y %d; fb word %x\n", BAND_H, FB_W,
+		   BAND_Y, rd32(FB_PA + (BAND_Y + BAND_H / 2) * FB_STRIDE + (FB_W / 2) * 4));
 	save("gpu: painted");
 	delay_ms(8000);		/* for the camera; the watchdog bites at 20 s */
 }
