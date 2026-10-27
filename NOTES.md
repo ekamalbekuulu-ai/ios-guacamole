@@ -1177,3 +1177,49 @@ Next moves (in order of value):
 - USB: gadget attaches with `vbus=3` (`DEVICE_DESCRIPTOR_FAILURE`) but no DWC3 event is ever seen;
   `sweetusbdma` (low DMA) panics in host code (`Unaligned kernel data abort`).
 - Working images: `work\gpu\shim-boot-usable.img` (iOS usable, `sweetgpu=0 sweetusb=0 sweetfb_fill=1`).
+
+## 2026-10-27 深夜 — 同 SoC 参考移植 + zap/PAS + shim GPU 探针
+
+### 关键发现：找到了同 SoC（SM8150 / Adreno 640）的可用参考
+`nithinyadavamaraboina-online/ios-rmx1931`（Realme X2 Pro）里有**已经跑通的 a640 全套**：
+- `shim/gpuprobe.c`（33 KB）：裸机完整 GPU 启动 —— GCC 时钟 → CX GDSC → gmu_rcg(XO) → ahb/cxo/cx_gmu → GMU 寄存器/TCM 测试 → Adreno SMMU(context bank) → RSC/PDC → 固件装载 → HFI 队列表 → CM3 释放 → HFI 消息 → **zap(PAS)** → SQE/环形队列/CP。每步前 `save("…")` 落盘。
+- `shim/log.c` + `ramlog.c` + `showlog.c` + `ufs.c`：**日志写到 userdata 末尾**，下次可从 TWRP 读回（我们一直缺的日志通道）。
+- 我们已把整套 shim 移植成 `shim-rmx/`（35 个文件 + `fw/` 固件，commit `515172c`），并写好了 `build.sh`。
+
+### zap shader / TrustZone PAS —— 之前的根本缺失
+- 本树 `a640_zap.mdt` 原本是 **0 字节**；zap 从未加载过，GMU 因此不放行（`FW_INIT_RESULT` 恒为 0，不是 `0xBABEFACE`）。
+- 从 `work/vendor.img`（LineageOS payload 解出的 vendor 分区）用 `tools/ext4-get.py` 抽出：
+  `/firmware/a640_zap.mdt` 6860 B、`.b00` 148 B、`.b01` 6712 B、`.b02` 1968 B。
+- DT 证实：`pil_gpu { qcom,pas-id = <13>; qcom,firmware-name = "a640_zap"; }`。
+- **正确的 PAS 顺序**（照 ios-rmx1931，与我早期猜测不同）：
+  `SCM_PIL(cmd) = 0x42000000 | (2<<8) | cmd`，PAS id 13：
+  1. `cmd 7` PAS_IS_SUPPORTED（arginfo 1）
+  2. `cmd 1` INIT_IMAGE（arginfo 0x82，metadata = 仅 .mdt）
+  3. `cmd 2` MEM_SETUP（arginfo 3，region 8 KiB）
+  4. 把 `.b02` 拷进 region
+  5. `cmd 5` AUTH_AND_RESET（arginfo 1）← **认证是 cmd 5，不是 cmd 2**
+
+### 本轮提交的补丁
+| 补丁 | 内容 |
+|---|---|
+| 0113 | CX 侧 4 支 GPUCC 时钟（apb/snoc_dvm/cxo_aon/crc_ahb）+ 先证明再写（**实测会把只读步骤写崩**，已被 0115 改成 opt-in） |
+| 0114 | a640 寄存器表 `sweet_gpu_tables.h`（49 条 hwcg + 32 条 protect 跨度）+ `gpu_apply_hwcg()` |
+| 0115 | CX 时钟写改为 `sweetgpu_cxclk=1` 才做（默认不动） |
+| 0116 | PDC TCS/ENABLE 改为 `sweetgpu_pdc=1` 才做（默认跳过） |
+| 0117 | GMU RCG 默认不再手写（保留 ABL 的 200 MHz 配置），`sweetgpu_rcg=1` 恢复旧行为 |
+| 0118 | zap 固件内嵌 + SCM64 + PAS（**初版功能号猜错**） |
+| 0119 | 按 ios-rmx1931 修正 PAS 顺序（cmd 2 = MEM_SETUP，cmd 5 = AUTH） |
+| 0120 | 补 `extern uint64_t kvtophys(vm_offset_t)`（CI 报 implicit declaration） |
+
+### 实测（阶梯二分，全部走 halt 判定）
+- `rpmh=1` 只读 → 活；`rpmh=4`（RSC 全写）→ **活**；`rpmh=5`（+PDC seq uCode）→ **活**；
+  `rpmh=6`（+PDC TCS/ENABLE）→ **崩**。⇒ 唯一会写崩 SoC 的是 PDC 使能。
+- `0116`（PDC 已跳过）→ 崩过一次，与 `rpmh=5` 应为等价 ⇒ **怀疑寄存器访问有临界/偶发性**，需要重复性验证。
+- 曾出现 `rpmh=1` 早期活、加 0113 后崩 ⇒ 结论依赖内核版本，务必记版本。
+
+### 下一步（按优先级）
+1. **构建 `shim-rmx/`**：CI 的 `build-all.yml` 是把补丁内联进 workflow 的巨型文件（18k 行），
+   要么在它里面加一个 `Build shim-rmx` 步骤 + 上传 `shim-rmx-boot.img`，要么本地装 aarch64-linux-gnu 工具链编。
+2. 刷 `shim-rmx` 镜像：它会在裸机里跑完整 a640 启动，每步写日志到 userdata 末尾；
+   再用 `SHIM_SHOWLOG` 或 TWRP 读回，判断停在哪个 stage。
+3. 内核侧：等 0120 编过、验证 zap 认证（左上角色条 绿/黄/红），再接 CM3/HFI。
