@@ -8,7 +8,7 @@ diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccel
 new file mode 100644
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetAccelerator.cpp
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,85 @@
 +/*
 + * The GPU as Metal sees it. Metal.framework (MTLRegisterDevices) iterates
 + * IOServiceMatching("IOAcceleratorES"), loads
@@ -24,6 +24,7 @@ new file mode 100644
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
 +#include <pexpert/pexpert.h>
 +#include <kern/debug.h>
 +#include <IOKit/IOLib.h>

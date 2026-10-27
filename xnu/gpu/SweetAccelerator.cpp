@@ -13,6 +13,7 @@
  */
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 #include <IOKit/IOService.h>
+#include <IOKit/IOUserClient.h>
 #include <pexpert/pexpert.h>
 #include <kern/debug.h>
 #include <IOKit/IOLib.h>
