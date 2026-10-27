@@ -13,6 +13,8 @@
  */
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 #include <IOKit/IOService.h>
+#include <pexpert/pexpert.h>
+#include <kern/debug.h>
 #include <IOKit/IOLib.h>
 #include <pexpert/pexpert.h>
 
@@ -54,6 +56,12 @@ SweetAccelerator::start(IOService *provider)
 	setProperty("model", "Adreno 640");
 	registerService();
 	IOLog("SWEET MTL: IOAcceleratorES published (MetalPluginName SweetMetal)\n");
+	{
+		uint32_t h = 0;
+		if (PE_parse_boot_argn("sweetmtl_halt", &h, sizeof(h)) && h) {
+			panic("SWEET MTL: IOAcceleratorES published (sweetmtl_halt=1)");
+		}
+	}
 	return true;
 }
 /* The user client lives in bsd/dev/sweet_accel_client.cpp. */
