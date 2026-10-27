@@ -115,14 +115,17 @@ static void probe_draw(void)
 	int rows = con_rows();
 	if (rows > PROBE_TEXT_ROWS)
 		rows = PROBE_TEXT_ROWS;
-	/* ~80 chars per row at 1440x3120 with the 2x font: keep a margin so the
-	 * tail is never cut by con_text() reaching the row limit. */
-	unsigned cap = (unsigned)rows * 80u;
-	uint32_t s = log_len > cap ? log_len - cap : 0;
-	while (s < log_len && log_buf[s] != '\n')
-		s++;
-	if (s < log_len)
-		s++;
+	/* Show the TAIL: walk back past `rows` newlines. Estimating the capacity
+	 * from a characters-per-row figure is not reliable, because a long line
+	 * wraps onto a second row and con_text() then silently drops the rest. */
+	uint32_t s = log_len;
+	int nl = 0;
+	while (s > 0 && nl < rows) {
+		if (log_buf[--s] == '\n')
+			nl++;
+	}
+	if (s > 0)
+		s++;			/* start just after that newline */
 	con_home();
 	con_text(log_buf + s, log_len - s, WHITE);
 	if (con_row() < rows)
