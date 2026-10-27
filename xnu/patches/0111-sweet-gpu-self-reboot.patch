@@ -1,0 +1,51 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -54,6 +54,12 @@
+ #define GPU_GCC_PA		0x00100000u
+ #define GPUCC_PA		0x02c90000u
+ #define GPU_PA			0x02c00000u
++/*
++ * Reset helpers, same addresses the shim uses (shim/boards/guacamole.h:
++ * MARK_PA / IMEM_RESTART_REASON / PSHOLD).
++ */
++#define SWEET_IMEM_RESTART_REASON	0x146bf65cu
++#define SWEET_PSHOLD			0x0c264000u
+ #define GPU_GMU_PA		0x02c6a000u
+ #define GPU_GMU_SIZE		0x00030000u
+ 
+@@ -1237,7 +1243,33 @@
+ 	 * continues, so a frozen screen is the only way to read the registers.
+ 	 */
+ 	{
+-		int halt = 0;
++		int halt = 0, reboot = 0;
++		(void)PE_parse_boot_argn("sweetgpu_reboot", &reboot, sizeof(reboot));
++		if (reboot) {
++			/*
++			 * Fully automatic experiment loop: ask ABL for the bootloader
++			 * (IMEM restart_reason = 0x77665500, the value the vendor
++			 * msm-poweroff driver writes for PON_RESTART_REASON_BOOTLOADER)
++			 * and then drop PS_HOLD, so the phone comes back in fastboot on
++			 * its own and the next image can be flashed without anyone
++			 * touching it. The ring log survives in userdata, so the
++			 * previous run's output is read back with TWRP afterwards.
++			 */
++			printf("SWEET GPU: probe done, rebooting to bootloader (sweetgpu_reboot=1)\n");
++			vm_offset_t imem = ml_io_map(SWEET_IMEM_RESTART_REASON & ~0xfffu, 0x1000u);
++			if (imem != 0) {
++				*(volatile uint32_t *)(imem + (SWEET_IMEM_RESTART_REASON & 0xfffu)) = 0x77665500u;
++				__asm__ volatile("dsb sy" ::: "memory");
++			}
++			vm_offset_t pm = ml_io_map(SWEET_PSHOLD, 0x1000u);
++			if (pm != 0) {
++				*(volatile uint32_t *)pm = 0;
++				__asm__ volatile("dsb sy" ::: "memory");
++			}
++			for (;;) {
++				__asm__ __volatile__("wfe");
++			}
++		}
+ 		if (PE_parse_boot_argn("sweetgpu_halt", &halt, sizeof(halt)) && halt) {
+ 			printf("SWEET GPU: probe done, halting (sweetgpu_halt=1)\n");
+ 			for (;;) {
