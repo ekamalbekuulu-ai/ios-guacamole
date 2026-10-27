@@ -6,10 +6,9 @@ and does not apply here.
 
 diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
 new file mode 100644
-index 000000000..5464cdfb6
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetAccelerator.cpp
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,84 @@
 +/*
 + * The GPU as Metal sees it. Metal.framework (MTLRegisterDevices) iterates
 + * IOServiceMatching("IOAcceleratorES"), loads
@@ -25,6 +24,8 @@ index 000000000..5464cdfb6
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +#include <IOKit/IOService.h>
++#include <pexpert/pexpert.h>
++#include <kern/debug.h>
 +#include <IOKit/IOLib.h>
 +#include <pexpert/pexpert.h>
 +
@@ -40,6 +41,8 @@ index 000000000..5464cdfb6
 +public:
 +	IOService *probe(IOService *provider, SInt32 *score) APPLE_KEXT_OVERRIDE;
 +	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn newUserClient(task_t, void *, UInt32, OSDictionary *, IOUserClient **)
++	    APPLE_KEXT_OVERRIDE;
 +};
 +
 +OSDefineMetaClassAndStructors(SweetAccelerator, IOAcceleratorES);
@@ -64,8 +67,31 @@ index 000000000..5464cdfb6
 +	setProperty("model", "Adreno 640");
 +	registerService();
 +	IOLog("SWEET MTL: IOAcceleratorES published (MetalPluginName SweetMetal)\n");
++	{
++		uint32_t h = 0;
++		if (PE_parse_boot_argn("sweetmtl_halt", &h, sizeof(h)) && h) {
++			panic("SWEET MTL: IOAcceleratorES published (sweetmtl_halt=1)");
++		}
++	}
 +	return true;
 +}
++/* The user client lives in bsd/dev/sweet_accel_client.cpp. */
++extern "C" IOService *sweet_accel_create_user_client(IOService *provider);
++
++IOReturn
++SweetAccelerator::newUserClient(task_t owningTask, void *securityID, UInt32 type,
++    OSDictionary *properties, IOUserClient **handler)
++{
++	(void)owningTask; (void)securityID; (void)type; (void)properties;
++	if (handler == NULL) return kIOReturnBadArgument;
++	IOService *client = sweet_accel_create_user_client(this);
++	if (client == NULL) return kIOReturnNoMemory;
++	IOUserClient *uc = OSDynamicCast(IOUserClient, client);
++	if (uc == NULL) { client->release(); return kIOReturnError; }
++	*handler = uc;
++	return kIOReturnSuccess;
++}
++
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
 index acc9ae026..fb2450dcb 100644
