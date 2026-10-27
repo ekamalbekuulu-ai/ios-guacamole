@@ -1206,7 +1206,7 @@ diff --git a/bsd/dev/sweet_a6xx_host.c b/bsd/dev/sweet_a6xx_host.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx_host.c
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,313 @@
 +/*
 + * Kernel environment for the Adreno 640 core in sweet_a6xx.c.
 + *
@@ -1465,6 +1465,18 @@ new file mode 100644
 +	a6_log("bring-up stage %d %s in %llu ms (pool 0x%llx, zap %s)\n", stage,
 +	    rc ? "FAILED" : "done, GPU ready", ns / 1000000, gpu.pool_pa,
 +	    stage >= 2 ? "on" : "off");
++	/* One fixed line, so a single photo of the froze panel is enough evidence. */
++	a6_log("RESULT stage=%d ok=%d ready=%d cp=%d\n", stage, rc == 0, (int)gpu_ready,
++	    (int)a6_cp_running(&gpu));
++	{
++		int halt = 0;
++		if (PE_parse_boot_argn("sweeta6xx_halt", &halt, sizeof(halt)) && halt) {
++			a6_log("halting (sweeta6xx_halt=1)\n");
++			for (;;) {
++				__asm__ __volatile__("wfe");
++			}
++		}
++	}
 +	(void)thread_terminate(current_thread());
 +	thread_block(THREAD_CONTINUE_NULL);
 +}
