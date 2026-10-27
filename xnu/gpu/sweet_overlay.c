@@ -34,7 +34,6 @@
 /* The arm64 kernel build has -Werror=implicit-function-declaration and neither
  * of these is reachable from the headers above; declare them exactly as XNU
  * defines them (sweet_a6xx_host.c declares thread_terminate the same way). */
-extern int vn_symlink(vnode_t dvp, char *name, int segflg, char *target, vfs_context_t ctx);
 extern kern_return_t thread_terminate(thread_t);
 
 extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
@@ -165,23 +164,11 @@ ov_write_file(const char *path, const uint8_t *data, uint64_t size, int mode)
 static int
 ov_symlink(const char *path, const char *target)
 {
-	vfs_context_t ctx = vfs_context_kernel();
-	char parent[OV_MAXPATH];
-	vnode_t dvp = NULLVP;
-
-	strlcpy(parent, path, sizeof(parent));
-	char *slash = strrchr(parent, '/');
-	if (slash == NULL) {
-		return -1;
-	}
-	*slash = 0;
-	(void)ov_mkdir(parent, 0755);
-	if (vnode_lookup(parent, 0, &dvp, ctx) != 0) {
-		return -1;
-	}
-	int err = vn_symlink(dvp, slash + 1, UIO_SYSSPACE, (char *)target, ctx);
-	vnode_put(dvp);
-	return err == 0 ? 0 : -1;
+	/* This XNU has no vn_symlink(), and the overlay only ships regular files
+	 * (the Metal bundle), so a link is logged and skipped instead of failing
+	 * the whole injection. */
+	ov_log("skip symlink %s -> %s (not supported here)\n", path, target);
+	return -1;
 }
 
 static uint64_t

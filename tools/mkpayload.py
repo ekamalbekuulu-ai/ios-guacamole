@@ -157,6 +157,67 @@ def add_gpufw_to_adt(adt_blob, directory):
     return adt.serialize(root)
 
 
+
+def _ustar_header(name, size, mode, typeflag=b'0'):
+    """One 512-byte POSIX ustar header (prefix field used for long paths)."""
+    h = bytearray(512)
+    prefix = b''
+    nb = name.encode()
+    if len(nb) > 100:
+        cut = nb.rfind(b'/', 0, 155)
+        assert cut > 0, 'overlay: path too long for ustar: %s' % name
+        prefix, nb = nb[:cut], nb[cut + 1:]
+    def put(off, val, width):
+        h[off:off + len(val)] = val
+        h[off + len(val):off + width] = b'\0' * (width - len(val))
+    h[0:100] = nb.ljust(100, b'\0')[:100]
+    h[100:108] = b'%07o\0' % mode
+    h[108:116] = b'0000000\0'
+    h[116:124] = b'0000000\0'
+    h[124:136] = b'%011o\0' % size
+    h[136:148] = b'00000000000\0'
+    h[148:156] = b'        '
+    h[156:157] = typeflag
+    h[257:263] = b'ustar\0'
+    h[263:265] = b'00'
+    h[345:345 + len(prefix)] = prefix
+    chk = sum(h)
+    h[148:156] = b'%06o\0 ' % chk
+    return bytes(h)
+
+
+def add_overlay_to_adt(adt_blob, directory):
+    """Return the ADT with /chosen "sweet-overlay" = a ustar of `directory`.
+
+    bsd/dev/sweet_overlay.c reads it at boot and installs the files into the
+    iOS root, so a userspace bundle costs an 18 MB boot image flash instead of
+    an 11 GB root image reflash. Paths are stored relative to /.
+    """
+    root, _ = adt.parse(adt_blob)
+    chosen = next(c for c in root.children if c.name == 'chosen')
+    out = bytearray()
+    n = 0
+    for dirpath, dirnames, filenames in os.walk(directory):
+        dirnames.sort()
+        rel = os.path.relpath(dirpath, directory)
+        if rel != '.':
+            d = rel.replace(os.sep, '/') + '/'
+            out += _ustar_header(d, 0, 0o755, b'5')
+            n += 1
+        for fn in sorted(filenames):
+            full = os.path.join(dirpath, fn)
+            name = (rel.replace(os.sep, '/') + '/' + fn).lstrip('./') if rel != '.' else fn
+            data = open(full, 'rb').read()
+            out += _ustar_header(name, len(data), 0o755 if (os.stat(full).st_mode & 0o111) else 0o644)
+            out += data + b'\0' * (-len(data) & 0x1ff)
+            n += 1
+    out += _ustar_header('TRAILER!!!', 0, 0)
+    out += b'\0' * (-len(out) & 0x1ff)
+    chosen.props = [p for p in chosen.props if p[0] != 'sweet-overlay']
+    chosen.props.append(('sweet-overlay', 0, bytes(out)))
+    print('overlay: %d entries, %d bytes' % (n, len(out)))
+    return adt.serialize(root)
+
 def adt_dram(adt_blob):
     """Kernel-managed RAM <base, size> from the ADT's /chosen dram-base/dram-size."""
     root, _ = adt.parse(adt_blob)
@@ -165,7 +226,7 @@ def adt_dram(adt_blob):
             struct.unpack('<Q', chosen.prop('dram-size'))[0])
 
 
-def build(kernel_path, adt_path, cmdline, ramdisk_path=None, gpufw_dir=None):
+def build(kernel_path, adt_path, cmdline, ramdisk_path=None, gpufw_dir=None, overlay_dir=None):
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
     nfix = apply_chained_fixups(buf, m)
@@ -179,6 +240,8 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None, gpufw_dir=None):
     kernel_end = (kernel_end + PAGE - 1) & ~(PAGE - 1)
 
     adt_blob = open(adt_path, 'rb').read()
+    if overlay_dir:
+        adt_blob = add_overlay_to_adt(adt_blob, overlay_dir)
     if gpufw_dir:
         adt_blob = add_gpufw_to_adt(adt_blob, gpufw_dir)
     # The ADT decides where the kernel's RAM is (mkadt.py --highmem).
@@ -225,10 +288,11 @@ if __name__ == '__main__':
     ap.add_argument('kernel'); ap.add_argument('adt'); ap.add_argument('out')
     ap.add_argument('--cmdline', default='debug=0xc serial=3 cpus=1 keepsyms=1')
     ap.add_argument('--ramdisk', help='root image for md0 (boot with rd=md0)')
+    ap.add_argument('--overlay', help='directory to install into the iOS root at boot (ustar in /chosen sweet-overlay)')
     ap.add_argument('--gpufw', help='directory with a640_gmu.bin / a630_sqe.fw / a640_zap.* '
                                     'to embed as /chosen gpufw,<name>')
     a = ap.parse_args()
-    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk, a.gpufw)
+    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk, a.gpufw, a.overlay)
     open(a.out, 'wb').write(blob)
     for k, v in info.items():
         if k != 'segs':
