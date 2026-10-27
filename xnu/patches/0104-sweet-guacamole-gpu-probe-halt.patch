@@ -57,16 +57,27 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  
  /* GPU SMMU (SMMU-500), GR0 global and stream-match registers. */
  #define GPU_SMMU_PA		0x02ca0000u
-@@ -532,7 +581,7 @@
+@@ -532,7 +581,18 @@
  static vm_offset_t
  gpu_rpmh_init(void)
  {
 -	vm_offset_t rscc = ml_io_map(0x18220000u, 0x10000u);
-+	vm_offset_t rscc = ml_io_map(0x02c8d000u, 0x10000u);
++	uint64_t rscc_pa = 0x18220000u;	/* safe: apps RSC, never hangs */
++	int try_rsc = 0;
++	/*
++	 * The GPU RSC lives at gmu + 0x23000 (0x02c8d000 on sm8150) but is
++	 * power gated until the GPU interconnect clocks come up; touching it
++	 * while gated wedges the NoC (the phone ends up in the 900E dump).
++	 * Only probe it behind sweetgpu_rsc=1.
++	 */
++	if (PE_parse_boot_argn("sweetgpu_rsc", &try_rsc, sizeof(try_rsc)) && try_rsc) {
++		rscc_pa = 0x02c8d000u;
++	}
++	vm_offset_t rscc = ml_io_map((vm_offset_t)rscc_pa, 0x10000u);
  	vm_offset_t pdc = ml_io_map(0xb290000u, 0x10000u);
  	vm_offset_t seq = ml_io_map(0xb490000u, 0x10000u);
  
-@@ -650,6 +699,7 @@
+@@ -650,6 +710,7 @@
  	uint32_t cx_before, gx_before, parent, cmd_before, cfg_before;
  	vm_offset_t gmu, fw_va = 0, hfi_va = 0, smmu = 0, rscc = 0;
  	uint32_t off, itcm = 0, dtcm = 0, bo = 0, skipped = 0, fault = 0;
@@ -74,7 +85,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  	bool layout_ok = true, rscc_ok = false;
  
  	if (fw == 0) {
-@@ -663,6 +713,8 @@
+@@ -663,6 +724,8 @@
  		printf("SWEET GPU: GMU mapping failed\n");
  		goto restore;
  	}
@@ -83,7 +94,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  
  	/* Reset the GMU block before loading anything into ITCM/DTCM. */
  	uint32_t bcr = gpu_rd(gpucc, GPUCC_GMU_BCR);
-@@ -792,23 +844,43 @@
+@@ -792,23 +855,43 @@
  		}
  	}
  
@@ -130,7 +141,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  	gpu_wr(gmu, GMU_HFI_SFR_ADDR, 0x06040100u);
  	/* Clear the CM3 NMI bit so the CM3 runs __main, not the NMI handler. */
  	gpu_wr(gmu, GMU_CM3_CFG, 0x4052u);
-@@ -849,6 +921,24 @@
+@@ -849,6 +932,24 @@
  	}
  	printf("SWEET GPU: gmu boot last=%#x want=%#x/%#x init=%#x %s\n",
  	    last, reset, mask, init, init_ok ? "ok" : "timeout");
@@ -155,7 +166,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  	printf("SWEET GPU: gmu boot intr=%#x gmu2host=%#x hfi=%#x fault=%d\n",
  	    gpu_rd(gmu, GMU_AO_HOST_INTR_STATUS),
  	    gpu_rd(gmu, GMU_GMU2HOST_INTR_INFO),
-@@ -1045,6 +1135,21 @@
+@@ -1045,6 +1146,21 @@
  	    gpu_rd(gpucc, GPUCC_GMU_BCR), gpu_rd(gpucc, GPUCC_RCG_CMD));
  	printf("SWEET GPU: gpucc gdscr gx=%#x cx=%#x\n",
  	    gpu_rd(gpucc, GPUCC_GX_GDSCR), gpu_rd(gpucc, GPUCC_CX_GDSCR));
