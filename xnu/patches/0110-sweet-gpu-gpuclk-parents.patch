@@ -1,0 +1,37 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -62,6 +62,17 @@
+ #define GCC_GPU_MEMNOC_GFX	0x7100cu	/* voted branch */
+ #define GCC_GPU_SNOC_DVM_GFX	0x71018u
+ #define GCC_DDRSS_GPU_AXI	0x71154u	/* voted; also clocks the GPU SMMU */
++/*
++ * The clock sources behind gcc_gpu_memnoc_gfx_clk and gcc_gpu_snoc_dvm_gfx_clk
++ * are two clk_gate2 gates in the same register (vendor gcc-sm8150.c:
++ * gcc_gpu_gpll0_clk_src.enable_mask = BIT(15), parent "gpll0";
++ * gcc_gpu_gpll0_div_clk_src.enable_mask = BIT(16), parent "gpll0_out_even").
++ * They were never enabled here, which is why both branches read back with the
++ * halt bit set no matter how often their own enable bit is written.
++ */
++#define GCC_GPU_GPLL0_SRC	0x52004u
++#define GCC_GPU_GPLL0_SRC_EN	(1u << 15)
++#define GCC_GPU_GPLL0_DIV_EN	(1u << 16)
+ 
+ /* GPUCC, qcom,gpucc-sm8150. */
+ #define GPUCC_AHB_CLK		0x1078u		/* BIT(0), CLK_IS_CRITICAL */
+@@ -1142,6 +1153,15 @@
+ 		printf("SWEET GPU: config AHB still gated; not touching GPUCC\n");
+ 		return;
+ 	}
++	{
++		/* Un-gate the two clock sources first: gpll0 and gpll0_out_even. */
++		uint32_t before = gpu_rd(gcc, GCC_GPU_GPLL0_SRC);
++		gpu_wr(gcc, GCC_GPU_GPLL0_SRC,
++		    before | GCC_GPU_GPLL0_SRC_EN | GCC_GPU_GPLL0_DIV_EN);
++		delay(10);
++		printf("SWEET GPU: gcc_gpu_gpll0_clk_src 0x%x -> 0x%x\n",
++		    before, gpu_rd(gcc, GCC_GPU_GPLL0_SRC));
++	}
+ 	gpu_enable_branch(gcc, GCC_GPU_MEMNOC_GFX, "gcc_gpu_memnoc_gfx_clk");
+ 	gpu_enable_branch(gcc, GCC_GPU_SNOC_DVM_GFX, "gcc_gpu_snoc_dvm_gfx_clk");
+ 	if (stage >= 2) {
