@@ -9,7 +9,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  extern void sweet_rpmh_arc_dump(void);
-@@ -335,6 +336,37 @@
+@@ -335,6 +336,44 @@
  }
  
  /* Read-only liveness dump; a driver never writes these registers. */
@@ -23,7 +23,14 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 +static int
 +gpu_apply_hwcg(void)
 +{
++	vm_offset_t gpu = ml_io_map(GPU_PA, 0x40000);
 +	int applied = 0;
++
++	if (gpu == 0) {
++		printf("SWEET GPU: hwcg: GPU block map failed
++");
++		return -1;
++	}
 +
 +	for (unsigned i = 0; i < SWEET_A640_HWCG_COUNT; ++i) {
 +		uint32_t off = sweet_a640_hwcg[i].off;
@@ -47,7 +54,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  static void
  gpu_probe_core(void)
  {
-@@ -1272,6 +1304,14 @@
+@@ -1272,6 +1311,14 @@
  						if (stage >= 6) {
  							gpu_probe_smmu();
  						}
@@ -62,7 +69,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  						if (stage >= 7) {
  							gpu_boot_gmu(gpucc, gcc);
  						}
-@@ -1292,6 +1332,27 @@
+@@ -1292,6 +1339,27 @@
  			}
  		} else {
  			printf("SWEET GPU: GPUCC AHB is gated; skipping GPU core reads\n");
