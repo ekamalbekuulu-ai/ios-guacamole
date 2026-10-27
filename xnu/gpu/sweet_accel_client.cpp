@@ -48,6 +48,9 @@ extern "C" IOService *sweet_accel_create_user_client(IOService *provider);
 
 class SweetAcceleratorClient : public IOUserClient {
 	OSDeclareDefaultStructors(SweetAcceleratorClient)
+	/* IOUserClient declares this virtual but this XNU does not link its body;
+	 * without an override the vtable keeps an undefined reference. */
+	IOReturn exportObjectToClient(task_t, OSObject *, ipc_port_t *) APPLE_KEXT_OVERRIDE;
 
 	IOService *fProvider;
 
@@ -65,6 +68,12 @@ public:
 };
 
 OSDefineMetaClassAndStructors(SweetAcceleratorClient, IOUserClient)
+
+IOReturn
+SweetAcceleratorClient::exportObjectToClient(task_t, OSObject *, ipc_port_t *)
+{
+	return kIOReturnUnsupported;
+}
 
 bool
 SweetAcceleratorClient::initWithTask(task_t owningTask, void *securityID, UInt32 type,
