@@ -852,6 +852,7 @@ new file mode 100644
 +
 +static int zap_load(struct a6_gpu *g)
 +{
++	static uint8_t seg[0x10000];	/* .b02 is ~2 KB; the region is 8 KB */
 +	uint64_t r1 = 0;
 +	uint32_t mlen, slen;
 +	const uint8_t *mdt = a6_firmware("a640_zap.mdt", &mlen), *b02 = a6_firmware("a640_zap.b02", &slen);
@@ -868,7 +869,6 @@ new file mode 100644
 +		a6_log("zap: mem setup rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
 +		return -1;
 +	}
-+	static uint8_t seg[0x10000];
 +	memset(seg, 0, sizeof(seg));
 +	memcpy(seg, b02, slen);
 +	a6_write(zap_region, seg, zap_size);
