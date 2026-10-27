@@ -9,8 +9,8 @@ diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.h
-@@ -0,0 +1,150 @@
-+﻿/*
+@@ -0,0 +1,154 @@
++/*
 + * Adreno 640 core shared by the kernel (bsd/dev/sweet_gpu.c) and the
 + * userland bring-up tool (phone/gpu/gpu.c, built from this same file): power
 + * and GMU boot, HFI, SMMU banks, SQE + CP + zap shader, ringbuffer
@@ -96,6 +96,10 @@ new file mode 100644
 +void a6_set_zap_region(uint64_t pa, uint32_t size);
 +void a6_set_zap_enable(int on);
 +
++/* Phase gate for bring-up: -1 = run everything, 0 = stop before the pool work,
++ * 1..4 = stop after CX / GMU boot / HFI / CP. Set from sweeta6xx_stop=N. */
++extern int a6_stop_phase;
++
 +void a6_init_state(struct a6_gpu *g, uint64_t pool_pa);
 +int a6_power_up(struct a6_gpu *g);	/* everything up to a working CP with the zap shader; 0 = ok */
 +bool a6_cx_up(void);
@@ -164,7 +168,7 @@ diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1037 @@
+@@ -0,0 +1,1085 @@
 +/*
 + * Adreno 640 core (see sweet_a6xx.h). The bring-up follows shim/gpuprobe.c,
 + * which first worked on the phone; that file has the reasoning behind each
@@ -1106,10 +1110,58 @@ new file mode 100644
 +	return a6_ring(g, secure, 2, "secure mode off", 1000);
 +}
 +
++int a6_stop_phase;	/* 0 = stop before the pool work; 1..4 = after that phase; -1 = never */
++
++static void
++a6_halt_here(const char *what)
++{
++	a6_log("*** STOP after %s (sweeta6xx_stop)\n", what);
++	for (;;) {
++		__asm__ __volatile("wfe");
++	}
++}
++
 +int a6_power_up(struct a6_gpu *g)
 +{
-+	if (power_cx() || gmu_boot(g) || gmu_hfi(g) || gpu_cp(g))
++	a6_log("phase 1/4: CX power, clocks\n");
++	if (power_cx()) {
++		a6_log("phase 1 FAILED (cx)\n");
 +		return -1;
++	}
++	a6_log("phase 1 OK (cx up)\n");
++	if (a6_stop_phase == 1) {
++		a6_halt_here("phase 1 cx");
++	}
++
++	a6_log("phase 2/4: GMU firmware + CM3\n");
++	if (gmu_boot(g)) {
++		a6_log("phase 2 FAILED (gmu boot)\n");
++		return -1;
++	}
++	a6_log("phase 2 OK (CM3 booted)\n");
++	if (a6_stop_phase == 2) {
++		a6_halt_here("phase 2 gmu boot");
++	}
++
++	a6_log("phase 3/4: HFI queues\n");
++	if (gmu_hfi(g)) {
++		a6_log("phase 3 FAILED (hfi)\n");
++		return -1;
++	}
++	a6_log("phase 3 OK (hfi up)\n");
++	if (a6_stop_phase == 3) {
++		a6_halt_here("phase 3 hfi");
++	}
++
++	a6_log("phase 4/4: SQE, CP, zap\n");
++	if (gpu_cp(g)) {
++		a6_log("phase 4 FAILED (cp)\n");
++		return -1;
++	}
++	a6_log("phase 4 OK (cp running)\n");
++	if (a6_stop_phase == 4) {
++		a6_halt_here("phase 4 cp");
++	}
 +	return 0;
 +}
 +
@@ -1206,7 +1258,7 @@ diff --git a/bsd/dev/sweet_a6xx_host.c b/bsd/dev/sweet_a6xx_host.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx_host.c
-@@ -0,0 +1,503 @@
+@@ -0,0 +1,511 @@
 +/*
 + * Kernel environment for the Adreno 640 core in sweet_a6xx.c.
 + *
@@ -1498,18 +1550,6 @@ new file mode 100644
 +	    stage, got, alias, got_alias);
 +	a6_log("boot-args: [%s]\n", PE_boot_args() ? PE_boot_args() : "(null)");
 +
-+	/*
-+	 * TEMPORARY diagnostic: stop here, unconditionally, so the two lines above
-+	 * can actually be read off the panel. The console scrolls far too fast to
-+	 * photograph, and this hook runs after the CPU bring-up, i.e. below what a
-+	 * photo of the early boot covers. Remove this block once the boot-argument
-+	 * question is settled.
-+	 */
-+	a6_log("DIAG ENTRY HALT - remove after boot-arg question is settled\n");
-+	for (;;) {
-+		__asm__ __volatile("wfe");
-+	}
-+
 +	if (!stage && alias) {
 +		stage = alias;		/* ios-sweet/redwood used gpu=1 */
 +	}
@@ -1523,16 +1563,36 @@ new file mode 100644
 +	a6_set_zap_enable(stage >= 2);
 +	resolved_stage = (int)stage;
 +
++	/* sweeta6xx_stop=N: stop after phase N (1 CX, 2 GMU boot, 3 HFI, 4 CP),
++	 * 0 = stop before the pool work. Absent = run everything. */
++	{
++		uint32_t stop = 0;
++		a6_stop_phase = PE_parse_boot_argn("sweeta6xx_stop", &stop, sizeof(stop)) ?
++		    (int)stop : -1;
++		a6_log("stop_phase=%d\n", a6_stop_phase);
++	}
++
 +	vm_offset_t va = 0;
 +	if (kmem_alloc_contig(kernel_map, &va, A6_POOL_SIZE, PAGE_MASK, 0,
 +	    (ppnum_t)(atop_64(A6_POOL_ALIGN) - 1),
 +	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-+		a6_log("no contiguous pool of %llu bytes\n", A6_POOL_SIZE);
-+		return;
++		a6_log("POOL FAILED: no %llu bytes of contiguous memory\n", A6_POOL_SIZE);
++		a6_log("RESULT stage=%u ok=0 ready=0 cp=0 (pool)\n", stage);
++		for (;;) {
++			__asm__ __volatile("wfe");
++		}
 +	}
 +	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)va);
 +	a6_init_state(&gpu, ptoa_64(pn));
 +	pool_kva = va;
++	a6_log("pool %llu bytes at kva %#llx pa %#llx\n", A6_POOL_SIZE, (uint64_t)va,
++	    gpu.pool_pa);
++	if (a6_stop_phase == 0) {
++		a6_log("*** STOP before bring-up (sweeta6xx_stop=0)\n");
++		for (;;) {
++			__asm__ __volatile("wfe");
++		}
++	}
 +	flush_dcache64((addr64_t)gpu.pool_pa, (unsigned)A6_POOL_SIZE, TRUE);
 +
 +	thread_t thread;
