@@ -1079,3 +1079,49 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
      cpu_init, before arm_vm_init.
   5. panic hook at top of panic_trap_to_debugger: va_copy + _doprnt(fmt, &copy, sweet_early_putc, 16).
   Verify with tools/xnu-cc.py (compile+symbols) and patch-order simulation before the single CI run.
+
+## Session handoff 2026-10-27 14:xx (guacamole, USB log channel)
+
+Goal for this session: a real log channel (no more photographing the screen), then GPU.
+Requirement from the user: **the phone must always reach iOS, whatever the experimental
+code does.**
+
+### What was measured (new facts, not guesses)
+- With `sweetusb=2` the controller runs but the host only ever sees
+  `USB\DEVICE_DESCRIPTOR_FAILURE` (`USB\VID_0000&PID_0002`): the device attaches, ep0 never
+  answers. The kernel log shows **zero DWC3 events**, and ep0 is fully event driven.
+- `GHWPARAMS0` decodes to `mode=2 mwidth=64 swidth=32 awidth=64`, and `GEVNTADRHI` keeps
+  `0xffffffff` -> **the DWC3 addresses 64 bits**; the earlier "DMA above 4 GiB gets
+  truncated" theory is dead. DMA sits at `0x184910000` (kernel bank) and is fine.
+- Bisect with `sweetusbstep=`: `=3` (DMA + soft reset + event buffer + ep0 config, no
+  DALEPENA, no TRB arm) **boots to SpringBoard**. `=5` (adds DALEPENA + arming the ep0
+  SETUP TRB while the controller is still halted) **crashes to a Qualcomm crash dump**.
+  So issuing DEPCMD STARTTRANSFER while RUN_STOP=0 is what kills the SoC.
+
+### Changed (patches, in order)
+- `0105-sweet-usb-cdc-acm.patch`: CDC-ACM serial port replaces CDC-ECM ethernet. Console
+  ring -> bulk IN, position advances only when the host really read the chunk. CDC class
+  requests handled (SET/GET_LINE_CODING, SET_CONTROL_LINE_STATE, SEND_BREAK, SERIAL_STATE
+  notification). No ifnet/socket at all. Extra diagnostics: GHWPARAMS0 decode, DMA
+  above/below 4 GiB, `GEVNTADRHI` write/read probe, "no device events after 3 s" alarm,
+  and `sweetusbdma=<MiB>` to place the gadget DMA at a low physical address.
+- `0106-sweet-usb-boot-safe.patch`: bring-up runs on its own thread and waits
+  `sweetusbdelay=<s>` (default 15) so USB can never block the boot.
+- `0107-sweet-usb-arm-after-run.patch`: arm the ep0 SETUP TRB **after** RUN_STOP, and use
+  ep0/ep1 max packet 64 (512 is SuperSpeed-only; this core is USB 2.0 only).
+
+### Tooling added
+- `work/acm/wait-build.ps1`  wait for the build-all kernel artifact, verify the patch
+  strings in the binary, repack `work/acm/shim-boot-usbacm3.img`.
+- `work/acm/go.ps1`, `work/acm/try.ps1`  one-shot pack + `fastboot boot` + report what
+  Windows enumerated (`-Dma` for the low-DMA experiment).
+- `tools/read-com.ps1`  find the VID 1209 COM port and stream it to `work/acm/serial.log`.
+
+### Operational notes
+- The repository had been private; GitHub Actions minutes were exhausted and every job
+  failed in ~5 s with `steps=0` and no runner. Making the repo **public** fixed it
+  instantly (free minutes). That is the fix if builds fail that way again.
+- Always keep `sweetfb_fill=1` and `sweetgpu=0` in the cmdline: without `sweetfb_fill=1`
+  the full screen regression comes back (black bars).
+- `sweetlogdump=1` prints the previous run's persistent ring tail at boot: the cheapest
+  way to see where a crash happened, no USB required.
