@@ -24,6 +24,12 @@ $CC $CFLAGS -static -T shim.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments -W
 $OBJCOPY -O binary out/shim.elf out/Image
 size=$($NM out/shim.elf | awk '$3=="_end"{print strtonum("0x"$1)}')
 truncate -s "$size" out/Image
+# NO_PACK=1 stops here: CI uploads the bare aarch64 image and the boot image is
+# wrapped locally from a known-good shim (tools/repack-boot.py), which keeps the
+# stock header/DTB that this phone's ABL accepts.
+if [ "${NO_PACK:-0}" = 1 ]; then
+	echo "NO_PACK: out/Image ready"; ls -l out/Image; exit 0
+fi
 lz4 -q -9 -B7 -f out/Image out/Image.lz4
 if [ -n "${1:-}" ]; then cp "$1" out/ramdisk.bin; else
 	(cd out && rm -rf rd && mkdir rd && cd rd && find . | cpio -o -H newc --quiet | gzip -9 > ../ramdisk.bin)
