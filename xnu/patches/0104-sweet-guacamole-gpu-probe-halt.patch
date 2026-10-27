@@ -62,11 +62,40 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  gpu_rpmh_init(void)
  {
 -	vm_offset_t rscc = ml_io_map(0x18220000u, 0x10000u);
-+	vm_offset_t rscc = ml_io_map(0x02c23000u, 0x10000u);
++	vm_offset_t rscc = ml_io_map(0x02c8d000u, 0x10000u);
  	vm_offset_t pdc = ml_io_map(0xb290000u, 0x10000u);
  	vm_offset_t seq = ml_io_map(0xb490000u, 0x10000u);
  
-@@ -798,17 +847,32 @@
+@@ -650,6 +699,7 @@
+ 	uint32_t cx_before, gx_before, parent, cmd_before, cfg_before;
+ 	vm_offset_t gmu, fw_va = 0, hfi_va = 0, smmu = 0, rscc = 0;
+ 	uint32_t off, itcm = 0, dtcm = 0, bo = 0, skipped = 0, fault = 0;
++	uint32_t gmu_last_early = 0;
+ 	bool layout_ok = true, rscc_ok = false;
+ 
+ 	if (fw == 0) {
+@@ -663,6 +713,8 @@
+ 		printf("SWEET GPU: GMU mapping failed\n");
+ 		goto restore;
+ 	}
++	/* Firmware blocks land in DTCM and overwrite this word; read it first. */
++	gmu_last_early = gpu_rd(gmu, GMU_DTCM_LAST);
+ 
+ 	/* Reset the GMU block before loading anything into ITCM/DTCM. */
+ 	uint32_t bcr = gpu_rd(gpucc, GPUCC_GMU_BCR);
+@@ -792,23 +844,43 @@
+ 		}
+ 	}
+ 
+-	uint32_t last = gpu_rd(gmu, GMU_DTCM_LAST);
++	/*
++	 * Read DTCM_LAST before the firmware lands: the firmware blocks are
++	 * written into DTCM and overwrite this word, which then picks the
++	 * wrong FW_INIT_RESULT mask/reset pair.
++	 */
++	uint32_t last = gmu_last_early;
+ 	uint32_t mask = 0xffffffffu, reset = 0xbabefaceu;
+ 	if (last > 0x20010004u) {
  		mask = 0x1ffu;
  		reset = 0x100u;
  	}
@@ -101,7 +130,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  	gpu_wr(gmu, GMU_HFI_SFR_ADDR, 0x06040100u);
  	/* Clear the CM3 NMI bit so the CM3 runs __main, not the NMI handler. */
  	gpu_wr(gmu, GMU_CM3_CFG, 0x4052u);
-@@ -849,6 +913,24 @@
+@@ -849,6 +921,24 @@
  	}
  	printf("SWEET GPU: gmu boot last=%#x want=%#x/%#x init=%#x %s\n",
  	    last, reset, mask, init, init_ok ? "ok" : "timeout");
@@ -126,7 +155,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  	printf("SWEET GPU: gmu boot intr=%#x gmu2host=%#x hfi=%#x fault=%d\n",
  	    gpu_rd(gmu, GMU_AO_HOST_INTR_STATUS),
  	    gpu_rd(gmu, GMU_GMU2HOST_INTR_INFO),
-@@ -1045,6 +1127,21 @@
+@@ -1045,6 +1135,21 @@
  	    gpu_rd(gpucc, GPUCC_GMU_BCR), gpu_rd(gpucc, GPUCC_RCG_CMD));
  	printf("SWEET GPU: gpucc gdscr gx=%#x cx=%#x\n",
  	    gpu_rd(gpucc, GPUCC_GX_GDSCR), gpu_rd(gpucc, GPUCC_CX_GDSCR));
