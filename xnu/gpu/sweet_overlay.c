@@ -27,6 +27,8 @@
 #include <kern/thread.h>
 #include <kern/clock.h>
 #include <kern/sched_prim.h>
+#include <kern/debug.h>
+#include <pexpert/pexpert.h>
 #include <libkern/libkern.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
@@ -289,6 +291,15 @@ ov_apply(void)
 	}
 	ov_log("%u files, %u dirs, %u links, %u errors (hash %016llx)\n", files, dirs, links,
 	    errs, (unsigned long long)h);
+	{
+		/* sweetovl_halt=1: freeze here so one photo shows whether the
+		 * bundle actually reached the root filesystem. */
+		uint32_t hh = 0;
+		if (PE_parse_boot_argn("sweetovl_halt", &hh, sizeof(hh)) && hh) {
+			panic("SWEET OVL DONE: %u files %u dirs %u errors hash %016llx",
+			    files, dirs, errs, (unsigned long long)h);
+		}
+	}
 }
 
 static void
