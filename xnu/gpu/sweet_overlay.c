@@ -135,9 +135,13 @@ ov_write_file(const char *path, const uint8_t *data, uint64_t size, int mode)
 	ov_mkdirs_parent(path);
 	err = vnode_open(path, O_CREAT | O_TRUNC | FWRITE, mode & 07777, 0, &vp, ctx);
 	if (err != 0) {
+		ov_log("open %s failed err %d\n", path, err);
 		return -1;
 	}
-	(void)vnode_setsize(vp, 0, 0, ctx);
+	int seterr = vnode_setsize(vp, 0, 0, ctx);
+	if (seterr != 0) {
+		ov_log("setsize %s failed err %d\n", path, seterr);
+	}
 	uint64_t off = 0;
 	while (off < size) {
 		size_t chunk = (size_t)MIN((uint64_t)PAGE_SIZE, size - off);
@@ -146,6 +150,8 @@ ov_write_file(const char *path, const uint8_t *data, uint64_t size, int mode)
 		    UIO_SYSSPACE, IO_UNIT | IO_SYNC, vfs_context_ucred(ctx), &resid,
 		    vfs_context_proc(ctx));
 		if (err != 0 || resid != 0) {
+			ov_log("write %s off %llu failed err %d resid %d\n", path,
+			    (unsigned long long)off, err, resid);
 			vnode_close(vp, FWRITE, ctx);
 			return -1;
 		}
