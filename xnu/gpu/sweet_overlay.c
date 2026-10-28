@@ -125,13 +125,27 @@ ov_mkdirs_parent(const char *path)
 	(void)ov_mkdir(parent, 0755);
 }
 
+/* Kernel vnode lookups need a leading slash; ustar names never have one. */
+static const char *
+ov_abs(const char *path, char *buf, size_t bufsz)
+{
+	if (path[0] == '/') {
+		return path;
+	}
+	snprintf(buf, bufsz, "/%s", path);
+	return buf;
+}
+
 static int
 ov_write_file(const char *path, const uint8_t *data, uint64_t size, int mode)
 {
 	vfs_context_t ctx = vfs_context_kernel();
 	vnode_t vp = NULLVP;
 	int err;
+	char abuf[OV_MAXPATH];
+	const char *apath = ov_abs(path, abuf, sizeof(abuf));
 
+	path = apath;
 	ov_mkdirs_parent(path);
 	err = vnode_open(path, O_CREAT | O_TRUNC | FWRITE, mode & 07777, 0, &vp, ctx);
 	if (err != 0) {
@@ -149,13 +163,19 @@ ov_write_file(const char *path, const uint8_t *data, uint64_t size, int mode)
 		err = vn_rdwr(UIO_WRITE, vp, (caddr_t)(data + off), (int)chunk, (off_t)off,
 		    UIO_SYSSPACE, IO_UNIT | IO_SYNC, vfs_context_ucred(ctx), &resid,
 		    vfs_context_proc(ctx));
-		if (err != 0 || resid != 0) {
-			ov_log("write %s off %llu failed err %d resid %d\n", path,
-			    (unsigned long long)off, err, resid);
+		if (err != 0) {
+			ov_log("write %s off %llu failed err %d\n", path,
+			    (unsigned long long)off, err);
 			vnode_close(vp, FWRITE, ctx);
 			return -1;
 		}
-		off += chunk;
+		if (resid == (int)chunk) {
+			ov_log("write %s off %llu stalled (resid %d)\n", path,
+			    (unsigned long long)off, resid);
+			vnode_close(vp, FWRITE, ctx);
+			return -1;
+		}
+		off += (uint64_t)chunk - (uint64_t)resid;
 	}
 	(void)vnode_close(vp, FWRITE, ctx);
 
@@ -214,9 +234,32 @@ ov_stamp_matches(uint64_t h)
 	return match;
 }
 
+/*
+ * This hook runs from the UFS probe, which is earlier than the rootrw=1 remount,
+ * so a lookup of /System/Library succeeds while the mount is still read-only and
+ * every write fails with EROFS. Poll a real write to the same mount instead.
+ */
+static int
+ov_wait_writable(void)
+{
+	static const uint8_t probe[1] = { 'x' };
+	for (int i = 0; i < 120; i++) {
+		if (ov_write_file("/private/var/local/.ovprobe", probe, 1, 0644) == 0) {
+			ov_log("root is writable after %d ms\n", i * 500);
+			return 0;
+		}
+		delay(500 * 1000);
+	}
+	ov_log("root never became writable; skipping the overlay\n");
+	return -1;
+}
+
 static void
 ov_apply(void)
 {
+	if (ov_wait_writable() != 0) {
+		return;
+	}
 	DTEntry chosen;
 	void const *blob = NULL;
 	unsigned size = 0;
@@ -292,7 +335,7 @@ ov_apply(void)
 	/* stamp it so the next boot with the same payload skips all of this */
 	char txt[20];
 	snprintf(txt, sizeof(txt), "%016llx\n", (unsigned long long)h);
-	if (ov_mkdir("/private/var/local", 0777) == 0) {
+	if (errs == 0 && ov_mkdir("/private/var/local", 0777) == 0) {
 		(void)ov_write_file(OV_STAMP, (const uint8_t *)txt, strlen(txt), 0644);
 	}
 	ov_log("%u files, %u dirs, %u links, %u errors (hash %016llx)\n", files, dirs, links,
