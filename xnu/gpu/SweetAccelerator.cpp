@@ -38,10 +38,12 @@ public:
 
 OSDefineMetaClassAndStructors(SweetAccelerator, IOAcceleratorES);
 
-/* Published plugin name, and the instance the overlay redirects it through
- * when it could only install the bundle under /private/var/local. */
+/* Published plugin name, the instance the overlay redirects it through, and
+ * the redirect it may ask for before this service exists yet (the overlay
+ * thread and IOKit matching start at different times). */
 static SweetAccelerator *g_accel;
 static char g_plugin[96] = "SweetMetal";
+static char g_pending[96];
 
 IOService *
 SweetAccelerator::probe(IOService *provider, SInt32 *score)
@@ -72,6 +74,13 @@ SweetAccelerator::start(IOService *provider)
 	registerService();
 	IOLog("SWEET MTL: IOAcceleratorES published (MetalPluginName %s)\n", plugin);
 	g_accel = this;
+	/* The overlay may have run before this service existed; replay its ask. */
+	if (g_pending[0] != 0) {
+		strlcpy(g_plugin, g_pending, sizeof(g_plugin));
+		setProperty("MetalPluginName", g_plugin);
+		setProperty("IOGLBundleName", g_plugin);
+		IOLog("SWEET MTL: MetalPluginName replayed as %s\n", g_plugin);
+	}
 	{
 		uint32_t h = 0;
 		if (PE_parse_boot_argn("sweetmtl_halt", &h, sizeof(h)) && h) {
@@ -88,7 +97,12 @@ SweetAccelerator::start(IOService *provider)
 extern "C" void
 sweet_metal_plugin_set(const char *name)
 {
-	if (name == NULL || name[0] == 0 || g_accel == NULL) {
+	if (name == NULL || name[0] == 0) {
+		return;
+	}
+	strlcpy(g_pending, name, sizeof(g_pending));
+	if (g_accel == NULL) {
+		/* Not started yet: start() replays g_pending. */
 		return;
 	}
 	strlcpy(g_plugin, name, sizeof(g_plugin));
