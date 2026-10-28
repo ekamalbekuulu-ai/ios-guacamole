@@ -379,6 +379,27 @@ jobs:
           sudo mkdir -p /mnt/iosroot
           sudo mount -t hfsplus -o loop,force ios16-root.img /mnt/iosroot
           sudo python3 "$GITHUB_WORKSPACE/tools/sweet-root-tweaks.py" /mnt/iosroot
+          # Install the userspace Metal driver into the image. This MUST happen
+          # here: iOS 16 mounts the system volume read-only, so the in-kernel
+          # overlay injector cannot write /System/Library/Extensions at boot
+          # (proven on hardware: 3 files failed, only /private/var is writable).
+          MULT=$(gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts?name=sweet-metal&per_page=20" \
+                   --jq '[.artifacts[]|select(.expired==false)]|sort_by(.created_at)|last|.id' 2>/dev/null || true)
+          echo "sweet-metal artifact: ${MULT:-none}"
+          if [ -n "$MULT" ] && [ "$MULT" != "null" ]; then
+            gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$MULT/zip" > /tmp/metal.zip
+            rm -rf /tmp/metal && mkdir -p /tmp/metal
+            unzip -o -q /tmp/metal.zip -d /tmp/metal
+            sudo mkdir -p /mnt/iosroot/System/Library/Extensions
+            sudo rm -rf /mnt/iosroot/System/Library/Extensions/SweetMetal.bundle
+            sudo cp -R /tmp/metal/SweetMetal.bundle /mnt/iosroot/System/Library/Extensions/
+            sudo chmod -R 755 /mnt/iosroot/System/Library/Extensions/SweetMetal.bundle
+            sudo mkdir -p /mnt/iosroot/private/var/local
+            echo "=== installed into the image ==="
+            ls -l /mnt/iosroot/System/Library/Extensions/SweetMetal.bundle
+          else
+            echo "::warning::no sweet-metal artifact - the image will have no Metal driver"
+          fi
           sudo umount /mnt/iosroot
           rm -f "$OS" "$SYS" "$APP"
           df -h .
