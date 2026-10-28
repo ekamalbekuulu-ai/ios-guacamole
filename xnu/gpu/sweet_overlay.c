@@ -136,6 +136,8 @@ ov_abs(const char *path, char *buf, size_t bufsz)
 	return buf;
 }
 
+static int ov_last_errno;
+
 static int
 ov_write_file(const char *path, const uint8_t *data, uint64_t size, int mode)
 {
@@ -149,6 +151,7 @@ ov_write_file(const char *path, const uint8_t *data, uint64_t size, int mode)
 	ov_mkdirs_parent(path);
 	err = vnode_open(path, O_CREAT | O_TRUNC | FWRITE, mode & 07777, 0, &vp, ctx);
 	if (err != 0) {
+		ov_last_errno = err;
 		ov_log("open %s failed err %d\n", path, err);
 		return -1;
 	}
@@ -243,14 +246,21 @@ static int
 ov_wait_writable(void)
 {
 	static const uint8_t probe[1] = { 'x' };
+	/* /private/var/local may not exist yet: creating it is itself the first
+	 * writability test, and probing a missing directory always fails ENOENT. */
+	(void)ov_mkdir("/private/var", 0755);
+	(void)ov_mkdir("/private/var/local", 0777);
 	for (int i = 0; i < 120; i++) {
 		if (ov_write_file("/private/var/local/.ovprobe", probe, 1, 0644) == 0) {
 			ov_log("root is writable after %d ms\n", i * 500);
 			return 0;
 		}
+		if (i % 20 == 0) {
+			ov_log("still not writable after %d ms (err %d)\n", i * 500, ov_last_errno);
+		}
 		delay(500 * 1000);
 	}
-	ov_log("root never became writable; skipping the overlay\n");
+	ov_log("root never became writable (err %d)\n", ov_last_errno);
 	return -1;
 }
 
@@ -258,6 +268,10 @@ static void
 ov_apply(void)
 {
 	if (ov_wait_writable() != 0) {
+		uint32_t hh = 0;
+		if (PE_parse_boot_argn("sweetovl_halt", &hh, sizeof(hh)) && hh) {
+			panic("SWEET OVL SKIP: root never writable (err %d)", ov_last_errno);
+		}
 		return;
 	}
 	DTEntry chosen;
