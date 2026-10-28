@@ -17,6 +17,7 @@
 #include <pexpert/pexpert.h>
 #include <kern/debug.h>
 #include <IOKit/IOLib.h>
+#include <libkern/libkern.h>
 #include <pexpert/pexpert.h>
 
 class IOAcceleratorES : public IOService {
@@ -37,6 +38,11 @@ public:
 
 OSDefineMetaClassAndStructors(SweetAccelerator, IOAcceleratorES);
 
+/* Published plugin name, and the instance the overlay redirects it through
+ * when it could only install the bundle under /private/var/local. */
+static SweetAccelerator *g_accel;
+static char g_plugin[96] = "SweetMetal";
+
 IOService *
 SweetAccelerator::probe(IOService *provider, SInt32 *score)
 {
@@ -51,12 +57,21 @@ SweetAccelerator::start(IOService *provider)
 	if (!IOService::start(provider)) {
 		return false;
 	}
-	setProperty("MetalPluginName", "SweetMetal");
+	/* Metal builds "/System/Library/Extensions/<name>.bundle" from this, so the
+	 * name is also the way out of a read-only system directory: sweetmtlname=
+	 * ../../../private/var/local/SweetMetal normalises to a path the overlay can
+	 * always write. Default stays the plain bundle name. */
+	char plugin[96];
+	if (!PE_parse_boot_argn("sweetmtlname", plugin, sizeof(plugin)) || plugin[0] == 0) {
+		strlcpy(plugin, "SweetMetal", sizeof(plugin));
+	}
+	setProperty("MetalPluginName", plugin);
 	setProperty("MetalPluginClassName", "SweetMTLDevice");
-	setProperty("IOGLBundleName", "SweetMetal");
+	setProperty("IOGLBundleName", plugin);
 	setProperty("model", "Adreno 640");
 	registerService();
-	IOLog("SWEET MTL: IOAcceleratorES published (MetalPluginName SweetMetal)\n");
+	IOLog("SWEET MTL: IOAcceleratorES published (MetalPluginName %s)\n", plugin);
+	g_accel = this;
 	{
 		uint32_t h = 0;
 		if (PE_parse_boot_argn("sweetmtl_halt", &h, sizeof(h)) && h) {
@@ -65,6 +80,23 @@ SweetAccelerator::start(IOService *provider)
 	}
 	return true;
 }
+
+/* bsd/dev/sweet_overlay.c calls this when it installed the bundle only into
+ * /private/var/local: Metal builds the path from these properties, so pointing
+ * the name at "../../../private/var/local/SweetMetal" makes it load the copy
+ * that exists instead of the one the read-only /System refused. */
+extern "C" void
+sweet_metal_plugin_set(const char *name)
+{
+	if (name == NULL || name[0] == 0 || g_accel == NULL) {
+		return;
+	}
+	strlcpy(g_plugin, name, sizeof(g_plugin));
+	g_accel->setProperty("MetalPluginName", g_plugin);
+	g_accel->setProperty("IOGLBundleName", g_plugin);
+	IOLog("SWEET MTL: MetalPluginName redirected to %s\n", g_plugin);
+}
+
 /* The user client lives in bsd/dev/sweet_accel_client.cpp. */
 extern "C" IOService *sweet_accel_create_user_client(IOService *provider);
 

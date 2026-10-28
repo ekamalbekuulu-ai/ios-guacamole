@@ -45,6 +45,22 @@ extern int vprintf(const char *fmt, va_list ap);
 #define OV_STAMP	"/private/var/local/.sweet-overlay"
 #define OV_MAXPATH	320
 
+/*
+ * The archive stores paths relative to /, and the only entries we care about
+ * live under this prefix. Variant 1 re-roots just the bundle into
+ * /private/var/local: iOS always allows writes there (it is where the stamp
+ * and the shader caches go), whereas /System/Library/Extensions is refused on
+ * some boots. Metal reaches either copy because the path it builds is
+ * "/System/Library/Extensions/<MetalPluginName>.bundle", and that name is a
+ * boot-arg: "../../../private/var/local/SweetMetal" normalises to the second
+ * location (SweetAccelerator.cpp).
+ */
+#define OV_SRC_PREFIX	"System/Library/Extensions/"
+#define OV_VAR_ROOT	"/private/var/local/"
+/* What MetalPluginName becomes when only the /private/var copy landed:
+ * "/System/Library/Extensions/" + this + ".bundle" normalises to that copy. */
+#define OV_VAR_PLUGIN	"../../../private/var/local/SweetMetal"
+
 static void
 ov_log(const char *fmt, ...)
 {
@@ -138,6 +154,28 @@ ov_abs(const char *path, char *buf, size_t bufsz)
 
 static int ov_last_errno;
 
+/* A stale protected vnode or an immutable/append-only flag makes even root's
+ * O_CREAT fail; clearing the flags is the only thing an in-kernel writer can do
+ * about that, and it is exactly what the reference project's file service
+ * implies (it owns the volume and never sets them). */
+static int
+ov_clear_flags(const char *path)
+{
+	vfs_context_t ctx = vfs_context_kernel();
+	vnode_t vp = NULLVP;
+	struct vnode_attr va;
+	int err;
+
+	if (vnode_lookup(path, 0, &vp, ctx) != 0) {
+		return -1;
+	}
+	VATTR_INIT(&va);
+	VATTR_SET(&va, va_flags, 0);
+	err = vnode_setattr(vp, &va, ctx);
+	vnode_put(vp);
+	return err == 0 ? 0 : -1;
+}
+
 static int
 ov_write_file(const char *path, const uint8_t *data, uint64_t size, int mode)
 {
@@ -150,6 +188,10 @@ ov_write_file(const char *path, const uint8_t *data, uint64_t size, int mode)
 	path = apath;
 	ov_mkdirs_parent(path);
 	err = vnode_open(path, O_CREAT | O_TRUNC | FWRITE, mode & 07777, 0, &vp, ctx);
+	if (err != 0 && ov_clear_flags(path) == 0) {
+		ov_log("cleared flags on %s, retrying\n", path);
+		err = vnode_open(path, O_CREAT | O_TRUNC | FWRITE, mode & 07777, 0, &vp, ctx);
+	}
 	if (err != 0) {
 		ov_last_errno = err;
 		ov_log("open %s failed err %d\n", path, err);
@@ -254,7 +296,7 @@ ov_wait_writable(void)
 	 * so a photo names the errno within a couple of seconds instead of a minute. */
 	uint32_t hf = 0;
 	int fast = PE_parse_boot_argn("sweetovl_halt", &hf, sizeof(hf)) && hf;
-	for (int i = 0; i < (fast ? 4 : 120); i++) {
+	for (int i = 0; i < (fast ? 20 : 240); i++) {
 		if (ov_write_file("/private/var/local/.ovprobe", probe, 1, 0644) == 0) {
 			ov_log("root is writable after %d ms\n", i * 500);
 			return 0;
@@ -268,35 +310,19 @@ ov_wait_writable(void)
 	return -1;
 }
 
+static int ov_variant;		/* 0: /System layout, 1: /private/var/local */
+static unsigned ov_nfiles, ov_ndirs, ov_nlinks, ov_nerrs;
+
+/* One pass over the ustar blob. Variant 0 installs the archive as it was
+ * written (/System/Library/Extensions/...); variant 1 skips everything above
+ * the bundle and re-roots the bundle into /private/var/local. */
 static void
-ov_apply(void)
+ov_walk(const uint8_t *bytes, uint64_t size)
 {
-	if (ov_wait_writable() != 0) {
-		uint32_t hh = 0;
-		if (PE_parse_boot_argn("sweetovl_halt", &hh, sizeof(hh)) && hh) {
-			panic("SWEET OVL SKIP: root never writable (err %d)", ov_last_errno);
-		}
-		return;
-	}
-	DTEntry chosen;
-	void const *blob = NULL;
-	unsigned size = 0;
-
-	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
-	    SecureDTGetProperty(chosen, "sweet-overlay", &blob, &size) != kSuccess ||
-	    blob == NULL || size < 512) {
-		return;			/* no overlay in this payload */
-	}
-	const uint8_t *bytes = (const uint8_t *)blob;
-	uint64_t h = ov_hash(bytes, size);
-	if (ov_stamp_matches(h)) {
-		ov_log("stamp %016llx already applied\n", (unsigned long long)h);
-		return;
-	}
-
 	char path[OV_MAXPATH], link[OV_MAXPATH];
-	unsigned files = 0, dirs = 0, links = 0, errs = 0;
 	uint64_t pos = 0;
+
+	ov_nfiles = ov_ndirs = ov_nlinks = ov_nerrs = 0;
 
 	while (pos + 512 <= (uint64_t)size) {
 		const uint8_t *hdr = bytes + pos;
@@ -326,45 +352,101 @@ ov_apply(void)
 			strlcpy(path, tmp, sizeof(path));
 		}
 
+		char full[OV_MAXPATH];
+		const size_t plen = sizeof(OV_SRC_PREFIX) - 1;
+		if (ov_variant == 1) {
+			if (strncmp(path, OV_SRC_PREFIX, plen) != 0) {
+				pos = next;
+				continue;	/* only the bundle goes to /private/var */
+			}
+			snprintf(full, sizeof(full), "%s%s", OV_VAR_ROOT, path + plen);
+		} else {
+			snprintf(full, sizeof(full), "/%s", path);
+		}
+		/* ustar directory names carry a trailing slash; the vnode calls do not */
+		size_t flen = strlen(full);
+		while (flen > 1 && full[flen - 1] == '/') {
+			full[--flen] = 0;
+		}
+
 		if (type == '5') {
-			if (ov_mkdir(path, mode ? mode : 0755) == 0) {
-				dirs++;
+			if (ov_mkdir(full, mode ? mode : 0755) == 0) {
+				ov_ndirs++;
 			} else {
-				errs++;
+				ov_nerrs++;
 			}
 		} else if (type == '2') {
 			strlcpy(link, (const char *)(hdr + 157), sizeof(link));
-			if (ov_symlink(path, link) == 0) {
-				links++;
+			if (ov_symlink(full, link) == 0) {
+				ov_nlinks++;
 			} else {
-				errs++;
+				ov_nerrs++;
 			}
 		} else if (type == '0' || type == 0 || type == '7') {
-			if (ov_write_file(path, bytes + data, fsize, mode ? mode : 0644) == 0) {
-				files++;
+			if (ov_write_file(full, bytes + data, fsize, mode ? mode : 0644) == 0) {
+				ov_nfiles++;
 			} else {
-				errs++;
-				ov_log("%s failed\n", path);
+				ov_nerrs++;
+				ov_log("%s failed\n", full);
 			}
 		}
 		pos = next;
+	}
+}
+
+static void
+ov_apply(void)
+{
+	/* Try anyway even if the probe never succeeded: the probe tests one path,
+	 * and a failure there says nothing about the other destination. */
+	(void)ov_wait_writable();
+
+	DTEntry chosen;
+	void const *blob = NULL;
+	unsigned size = 0;
+
+	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
+	    SecureDTGetProperty(chosen, "sweet-overlay", &blob, &size) != kSuccess ||
+	    blob == NULL || size < 512) {
+		return;			/* no overlay in this payload */
+	}
+	const uint8_t *bytes = (const uint8_t *)blob;
+	uint64_t h = ov_hash(bytes, size);
+	if (ov_stamp_matches(h)) {
+		ov_log("stamp %016llx already applied\n", (unsigned long long)h);
+		return;
+	}
+
+	ov_variant = 0;
+	ov_walk(bytes, size);
+	unsigned sysf = ov_nfiles, sysd = ov_ndirs, syse = ov_nerrs;
+	ov_log("System: %u files, %u dirs, %u errors\n", sysf, sysd, syse);
+
+	ov_variant = 1;
+	ov_walk(bytes, size);
+	unsigned varf = ov_nfiles, vard = ov_ndirs, vare = ov_nerrs;
+	ov_log("/private/var/local: %u files, %u dirs, %u errors\n", varf, vard, vare);
+
+	/* Only the fallback copy is complete, so point Metal at it. */
+	if (syse > 0 && vare == 0 && varf > 0) {
+		extern void sweet_metal_plugin_set(const char *name);
+		ov_log("redirecting Metal to %s\n", OV_VAR_PLUGIN);
+		sweet_metal_plugin_set(OV_VAR_PLUGIN);
 	}
 
 	/* stamp it so the next boot with the same payload skips all of this */
 	char txt[20];
 	snprintf(txt, sizeof(txt), "%016llx\n", (unsigned long long)h);
-	if (errs == 0 && ov_mkdir("/private/var/local", 0777) == 0) {
+	if (syse == 0 && vare == 0) {
 		(void)ov_write_file(OV_STAMP, (const uint8_t *)txt, strlen(txt), 0644);
 	}
-	ov_log("%u files, %u dirs, %u links, %u errors (hash %016llx)\n", files, dirs, links,
-	    errs, (unsigned long long)h);
 	{
 		/* sweetovl_halt=1: freeze here so one photo shows whether the
-		 * bundle actually reached the root filesystem. */
+		 * bundle reached the root filesystem and where. */
 		uint32_t hh = 0;
 		if (PE_parse_boot_argn("sweetovl_halt", &hh, sizeof(hh)) && hh) {
-			panic("SWEET OVL DONE: %u files %u dirs %u errors hash %016llx",
-			    files, dirs, errs, (unsigned long long)h);
+			panic("SWEET OVL DONE: sys %u/%u var %u/%u hash %016llx",
+			    sysf, syse, varf, vare, (unsigned long long)h);
 		}
 	}
 }
