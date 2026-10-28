@@ -250,7 +250,11 @@ ov_wait_writable(void)
 	 * writability test, and probing a missing directory always fails ENOENT. */
 	(void)ov_mkdir("/private/var", 0755);
 	(void)ov_mkdir("/private/var/local", 0777);
-	for (int i = 0; i < 120; i++) {
+	/* Fail fast: with sweetovl_halt=1 the first failure is answered by a panic,
+	 * so a photo names the errno within a couple of seconds instead of a minute. */
+	uint32_t hf = 0;
+	int fast = PE_parse_boot_argn("sweetovl_halt", &hf, sizeof(hf)) && hf;
+	for (int i = 0; i < (fast ? 4 : 120); i++) {
 		if (ov_write_file("/private/var/local/.ovprobe", probe, 1, 0644) == 0) {
 			ov_log("root is writable after %d ms\n", i * 500);
 			return 0;
