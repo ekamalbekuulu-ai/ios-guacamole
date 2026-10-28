@@ -1,0 +1,68 @@
+sweet-fb: sweetbl=<0..100> software brightness, no DSI and no PMIC
+
+The panel is a DCS-controlled S6E3HC2 (dtbo bl-pmic-control-type=bl_ctrl_dcs),
+so real emission control needs a DSI command driver that does not exist yet.
+Scaling the scanout buffer is a real brightness change on AMOLED and costs no
+hardware risk; no boot argument means the byte-for-byte old behaviour.
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -51,6 +51,35 @@
+ #include <kern/clock.h>
+ #include <sys/proc.h>
+ 
++/*
++ * sweetbl=<0..100>: software dimming of the very buffer the SDE scans out.
++ * On an AMOLED the emission follows the pixel value, so scaling here dims the
++ * panel without touching DSI (patch 0129 in the reference project does the
++ * same on other boards). No boot argument means no change at all.
++ */
++static uint32_t sweet_fb_bl = 0xffffffffu;
++
++static inline uint32_t
++sweet_fb_dim(uint32_t c)
++{
++	if (sweet_fb_bl == 0xffffffffu) {
++		uint32_t p = 100;
++		if (!PE_parse_boot_argn("sweetbl", &p, sizeof(p)) || p == 0 || p > 100) {
++			p = 100;
++		}
++		sweet_fb_bl = p;
++		IOLog("SWEET FB: sweetbl=%u%%\n", p);
++	}
++	if (sweet_fb_bl >= 100) {
++		return c;
++	}
++	uint32_t a = c & 0xff000000u;
++	uint32_t r = (((c >> 16) & 0xffu) * sweet_fb_bl) / 100u;
++	uint32_t g = (((c >> 8) & 0xffu) * sweet_fb_bl) / 100u;
++	uint32_t b = ((c & 0xffu) * sweet_fb_bl) / 100u;
++	return a | (r << 16) | (g << 8) | b;
++}
++
+ enum {
+ 	kSweetFBGetLayerDefaultSurface  = 3,
+ 	kSweetFBSwapBegin               = 4,
+@@ -459,7 +488,7 @@
+ 					 * 1440x3120 at 30 Hz would be ~135 M divisions/s).
+ 					 */
+ 					for (int32_t x = 0; x < dw; x++) {
+-						d32[x] = s32[sweet_fb_xmap[x]];
++						d32[x] = sweet_fb_dim(s32[sweet_fb_xmap[x]]);
+ 					}
+ 				}
+ 			} else {
+@@ -467,6 +496,12 @@
+ 					memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+ 					    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+ 					    (size_t)w * 4);
++					if (sweet_fb_bl != 100) {
++						uint32_t *d32 = (uint32_t *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4);
++						for (int32_t x = 0; x < w; x++) {
++							d32[x] = sweet_fb_dim(d32[x]);
++						}
++					}
+ 				}
+ 			}
+ 		}

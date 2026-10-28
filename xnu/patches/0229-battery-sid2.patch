@@ -1,0 +1,267 @@
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -87,11 +87,22 @@
+ int
+ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+ {
+-	/* Restrict access to the battery blocks; keys retain their own lanes. */
++	/* Restrict access to the battery blocks; keys retain their own lanes.
++	 * The charger and the gauge live on PM8150B, which is SPMI USID 2 on
++	 * guacamole (DT: qcom,pm8150b@2, reg = <0x2 0x0>), so the old sid != 0
++	 * rule made every battery register unreachable. The allowed set is the
++	 * DT's own block list for that PMIC: qcom,qpnp-smb5 chgr/dcdc/batif/usb/
++	 * dc/typec/misc at 0x1000..0x1600, and qpnp,fg batt-soc/batt-info/rradc/
++	 * memif at 0x4000..0x4300 -- the VBATT/IBATT words 0x41A0..0x41A3 are
++	 * inside peripheral 0x41. 0x48 stays for the older gen3 layout.
++	 * Read-only: this widens a predicate, it adds no write path, and the
++	 * timeout rule below (one lane poisoned for the boot) is untouched. */
+ 	unsigned peripheral = addr >> 8;
+-	if (!sp_ready || !out || sid != 0 || addr > 0xffffu ||
++	if (!sp_ready || !out || sid > 15u || addr > 0xffffu ||
+ 	    (peripheral != 0x10 && peripheral != 0x11 && peripheral != 0x12 &&
+-	    peripheral != 0x13 && peripheral != 0x48)) {
++	    peripheral != 0x13 && peripheral != 0x16 && peripheral != 0x40 &&
++	    peripheral != 0x41 && peripheral != 0x42 && peripheral != 0x43 &&
++	    peripheral != 0x48)) {
+ 		return -1;
+ 	}
+ 	IOLockLock(sp_lock);
+diff --git a/bsd/dev/sweet_spmi.h b/bsd/dev/sweet_spmi.h
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -6,7 +6,10 @@
+ extern "C" {
+ #endif
+ int sweet_spmi_init(void);
+-/* Thread context only; 0 success, -1 failure; *out unchanged on failure. */
++/* Thread context only; 0 success, -1 failure; *out unchanged on failure.
++ * sid is the SPMI USID (PM8150B, which carries both charger and gauge, is 2
++ * on guacamole) and addr selects the peripheral: only the DT-declared PM8150B
++ * blocks are routed, and every call is a single read. */
+ int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
+ #ifdef __cplusplus
+ }
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -2,6 +2,11 @@
+  * Built-in iOS battery bring-up service. Default: 100%, AC, not charging.
+  * sweetbattery=1: read-only PM6150 polling every 30 seconds; voltage-derived
+  * SOC is an UNCALIBRATED estimate, not a replacement for the Linux QG algo.
++ * sweetbattery=1 sweetbatt=1: also read PM8150B at SPMI USID 2 -- gauge SOC
++ * (0x4009, gated on 0x4010 bit1) with the voltage curve only as fallback, real
++ * VBATT (0x41A0/0x41A1) and SMB5 charging state (0x1006/0x1310). Unlike the
++ * old all-or-nothing chain these blocks are independently valid. Without
++ * sweetbatt the file behaves exactly as before.
+  * See report.md for binary evidence, register provenance and integration.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+@@ -16,6 +21,28 @@
+ extern "C" int sweet_spmi_init(void);
+ extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
+ 
++/* PM8150B carries both the SMB5 charger and the fuel gauge on guacamole, and
++ * the DT places it at USID 2 (qcom,pm8150b@2, reg = <0x2 0x0>). Offsets are the
++ * vendor fg-reg.h and smb5 definitions for the fg-gen4 blocks that same DT
++ * declares: batt-soc@4000 and batt-info@4100. Everything below is read only. */
++#define SWEET_BATT_SID		2u
++#define SWEET_BATT_FG_SOC	0x4009u	/* BATT_SOC_FG_MONOTONIC_SOC, already % */
++#define SWEET_BATT_FG_RT_STS	0x4010u	/* BATT_SOC_INT_RT_STS */
++#define SWEET_BATT_SOC_READY	0x02u	/* bit1 SOC_READY: 0x4009 is live */
++#define SWEET_BATT_VBATT	0x41a0u	/* BATT_INFO_VBATT_LSB, MSB at +1 */
++#define SWEET_BATT_SYS_BATT	0x4107u	/* bit2 BATT_MISSING_HW */
++#define SWEET_BATT_BATT_MISSING	0x04u
++#define SWEET_BATT_CHGR_STATUS	0x1006u	/* smb5 chgr status, bits 2:0 */
++#define SWEET_BATT_USBIN_RT_STS	0x1310u	/* smb5 USB IN rt sts, bit4 = VBUS */
++/* The VBATT LSB scale is not in the DT: gen4 documents 122070 uV, the older
++ * gen3 part used 194637 uV. Take the raw word and keep whichever lands inside a
++ * single lithium cell's range, so a wrong guess shows as "no voltage" instead
++ * of a confident wrong number. */
++#define SWEET_BATT_VBATT_UV_GEN4	122070u
++#define SWEET_BATT_VBATT_UV_GEN3	194637u
++#define SWEET_BATT_VBATT_MIN_MV	2800u
++#define SWEET_BATT_VBATT_MAX_MV	4600u
++
+ class SweetBattery : public IOPMPowerSource {
+ 	OSDeclareDefaultStructors(SweetBattery);
+ public:
+@@ -27,15 +54,18 @@
+ 	IOWorkLoop *fLoop;
+ 	IOTimerEventSource *fTimer;
+ 	bool fTimerAdded, fRunning, fReal;
++	bool fSid2;
++	unsigned fLastMv;
+ 	int fLastMode;
+ 	void putNumber(const char *key, UInt32 value);
+ 	void putBool(const char *key, bool value);
+ 	void publish(unsigned percent, unsigned mv, int ma, bool external,
+ 	    bool capable, bool charging, bool full, bool measured, bool currentValid);
+ 	void poll(void);
++	void pollSid2(void);
+ 	static void timerFired(OSObject *owner, IOTimerEventSource *sender);
+ 	static IOReturn stopPolling(OSObject *owner, void *, void *, void *, void *);
+-	static bool readWord(unsigned address, uint16_t *value);
++	static bool readWord(unsigned sid, unsigned address, uint16_t *value);
+ 	static unsigned estimatePercent(unsigned mv);
+ };
+ OSDefineMetaClassAndStructors(SweetBattery, IOPMPowerSource);
+@@ -52,6 +82,8 @@
+ 	fLoop = NULL;
+ 	fTimer = NULL;
+ 	fTimerAdded = fRunning = fReal = false;
++	fSid2 = false;
++	fLastMv = 4200;	/* last real VBATT; static until a gauge word works */
+ 	if (dictionary) {
+ 		OSCollectionIterator *it = OSCollectionIterator::withCollection(dictionary);
+ 		if (!it) {
+@@ -164,13 +196,13 @@
+  * words to reject most torn ADC samples without writing the QG HOLD bit.
+  * This is a bounded consistency check, not a hardware snapshot guarantee. */
+ bool
+-SweetBattery::readWord(unsigned address, uint16_t *value)
++SweetBattery::readWord(unsigned sid, unsigned address, uint16_t *value)
+ {
+ 	uint16_t previous = 0;
+ 	for (unsigned attempt = 0; attempt < 4; ++attempt) {
+ 		uint8_t lo, hi;
+-		if (sweet_spmi_read(0, address, &lo) ||
+-		    sweet_spmi_read(0, address + 1, &hi)) {
++		if (sweet_spmi_read(sid, address, &lo) ||
++		    sweet_spmi_read(sid, address + 1, &hi)) {
+ 			return false;
+ 		}
+ 		uint16_t next = (uint16_t)((unsigned)lo | ((unsigned)hi << 8));
+@@ -206,12 +238,17 @@
+ void
+ SweetBattery::poll(void)
+ {
++	/* sweetbatt unset: take the old path unchanged, reads included. */
++	if (fSid2) {
++		pollSid2();
++		return;
++	}
+ 	uint8_t type, present, usb, path, charger, error, temperature;
+ 	uint16_t rawVoltage;
+ 	bool valid = fReal &&
+ 	    !sweet_spmi_read(0, 0x4804, &type) && type == 0x0d &&
+ 	    !sweet_spmi_read(0, 0x4808, &present) && (present & 1u) &&
+-	    readWord(0x48c0, &rawVoltage) && rawVoltage != 0x8000 &&
++	    readWord(0, 0x48c0, &rawVoltage) && rawVoltage != 0x8000 &&
+ 	    !sweet_spmi_read(0, 0x1310, &usb) &&
+ 	    !sweet_spmi_read(0, 0x110b, &path) &&
+ 	    !sweet_spmi_read(0, 0x1006, &charger) &&
+@@ -235,7 +272,7 @@
+ 	uint8_t subtype;
+ 	uint16_t rawCurrent;
+ 	bool currentValid = !sweet_spmi_read(0, 0x4805, &subtype) &&
+-	    (subtype == 3 || subtype == 4) && readWord(0x48c2, &rawCurrent) &&
++	    (subtype == 3 || subtype == 4) && readWord(0, 0x48c2, &rawCurrent) &&
+ 	    rawCurrent != 0x8000;
+ 	if (currentValid) {
+ 		int signedRaw = (rawCurrent & 0x8000u) ? (int)rawCurrent - 65536 : (int)rawCurrent;
+@@ -246,6 +283,88 @@
+ 	    charging, full, true, currentValid);
+ }
+ 
++/*
++ * Real PM8150B read path, enabled by boot-arg sweetbatt=1. Same discipline as
++ * the old path: one observer EXT_READL per byte, no PMIC write anywhere, and a
++ * failed read is "unknown" rather than zero. SOC, voltage and charger state are
++ * independently valid, so one dead block can no longer collapse the battery to
++ * the static 100%.
++ */
++void
++SweetBattery::pollSid2(void)
++{
++	uint8_t soc = 0, socSts = 0, sysBatt = 0, chgr = 0, usb = 0;
++	uint16_t rawVoltage = 0;
++	unsigned uv = SWEET_BATT_VBATT_UV_GEN4;
++	unsigned mv;
++
++	if (!fReal) {
++		publish(100, 4200, 0, true, true, false, true, false, false);
++		return;
++	}
++	/* 0x4010 bit1 gates 0x4009: without SOC_READY that byte is stale. */
++	bool socOk = !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_FG_RT_STS,
++	    &socSts) && (socSts & SWEET_BATT_SOC_READY) &&
++	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_FG_SOC, &soc) &&
++	    soc <= 100u;
++	bool mvOk = readWord(SWEET_BATT_SID, SWEET_BATT_VBATT, &rawVoltage) &&
++	    rawVoltage != 0 && rawVoltage != 0xffffu;
++	mv = mvOk ? (unsigned)(((uint64_t)rawVoltage * uv) / 1000000u) : 0;
++	if (mvOk && (mv < SWEET_BATT_VBATT_MIN_MV || mv > SWEET_BATT_VBATT_MAX_MV)) {
++		uv = SWEET_BATT_VBATT_UV_GEN3;
++		mv = (unsigned)(((uint64_t)rawVoltage * uv) / 1000000u);
++	}
++	mvOk = mvOk && mv >= SWEET_BATT_VBATT_MIN_MV &&
++	    mv <= SWEET_BATT_VBATT_MAX_MV;
++	/* Only a successful read that says "hardware missing" counts as absent;
++	 * an unreadable byte is unknown and never invalidates the rest. */
++	bool missing = !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_SYS_BATT,
++	    &sysBatt) && (sysBatt & SWEET_BATT_BATT_MISSING);
++	bool chgOk = !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_CHGR_STATUS,
++	    &chgr) && !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_USBIN_RT_STS,
++	    &usb);
++	if (!socOk && !mvOk && !chgOk) {
++		/* Nothing on the PMIC answered: the one case that keeps the old
++		 * static source, so an absent charger is never reported as absent
++		 * battery. */
++		publish(100, 4200, 0, true, true, false, true, false, false);
++		IOLog("SWEET BATTERY SID2: every read failed, static fallback\n");
++		return;
++	}
++	/* A gauge-less or pack-less sample must never become a 0% shutdown. */
++	bool measured = (socOk || mvOk) && !missing;
++	bool external = chgOk && (usb & 0x10u) != 0;
++	unsigned state = chgr & 7u;
++	/* The unproven 0x1007/0x100d gates are dropped: the working rmx1931 port
++	 * decodes these two bytes and nothing else. 0x110b (charge path) is
++	 * equally unproven, so "capable" follows VBUS presence instead. */
++	bool charging = external && state >= 1u && state <= 4u;
++	bool full = external && state == 5u;
++	unsigned percent = socOk ? (unsigned)soc :
++	    (mvOk ? estimatePercent(mv) : 100u);
++	if (mvOk) {
++		fLastMv = mv;	/* hold the last real voltage over a failed word */
++	}
++	if (!measured || full) {
++		percent = 100;
++	}
++	/* Exactly one line per poll: the raw bytes, so a photo of the log proves
++	 * the PMIC answered, plus what was published. */
++	IOLog("SWEET BATTERY SID2: soc=%#x sts=%#x ready=%d vbatt=%#x mv=%u "
++	    "uv=%u chgr=%#x usb=%#x sysbatt=%#x -> %u%% %umV "
++	    "external=%d charging=%d full=%d\n",
++	    (unsigned)soc, (unsigned)socSts,
++	    (socSts & SWEET_BATT_SOC_READY) ? 1 : 0, (unsigned)rawVoltage, mv, uv,
++	    (unsigned)chgr, (unsigned)usb, (unsigned)sysBatt, percent, fLastMv,
++	    external ? 1 : 0, charging ? 1 : 0, full ? 1 : 0);
++	/* IBATT (0x41A2/0x41A3) is deliberately not read: the gen4 current LSB is
++	 * unproven, and a timed-out read poisons that APID lane for the whole boot,
++	 * which would take VBATT down with it. Amperage stays unpublished rather
++	 * than guessed; 0228-battery-diag prints the raw word when needed. */
++	publish(percent, fLastMv, 0, external, external, charging, full, measured,
++	    false);
++}
++
+ void
+ SweetBattery::timerFired(OSObject *owner, IOTimerEventSource *sender)
+ {
+@@ -265,6 +384,15 @@
+ 	int real = 0;
+ 	(void)PE_parse_boot_argn("sweetbattery", &real, sizeof(real));
+ 	fReal = real == 1 && sweet_spmi_init() == 0;
++	/* sweetbatt=1 opts in to the PM8150B (USID 2) reads, on top of the real
++	 * polling above. Without it fSid2 stays false and poll() is unchanged. */
++	int sid2 = 0;
++	(void)PE_parse_boot_argn("sweetbatt", &sid2, sizeof(sid2));
++	fSid2 = fReal && sid2 == 1;
++	if (fSid2) {
++		IOLog("SWEET BATTERY: PM8150B SID %u read path enabled (sweetbatt=1)\n",
++		    SWEET_BATT_SID);
++	}
+ 	/* Publish a complete source BEFORE registerService wakes powerd. */
+ 	poll();
+ 	if (fReal) {
