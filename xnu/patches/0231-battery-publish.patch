@@ -1,0 +1,132 @@
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -6,7 +6,10 @@
+  * (0x4009, gated on 0x4010 bit1) with the voltage curve only as fallback, real
+  * VBATT (0x41A0/0x41A1) and SMB5 charging state (0x1006/0x1310). Unlike the
+  * old all-or-nothing chain these blocks are independently valid. Without
+- * sweetbatt the file behaves exactly as before.
++ * sweetbatt the file behaves exactly as before. What the gauge reports is what
++ * gets published: a poll whose percentage jumps by more than SWEET_BATT_SOC_JUMP
++ * points keeps the previously published value until a second poll agrees, so the
++ * number on screen cannot flicker between the gauge and the voltage curve.
+  * See report.md for binary evidence, register provenance and integration.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+@@ -42,6 +45,10 @@
+ #define SWEET_BATT_VBATT_UV_GEN3	194637u
+ #define SWEET_BATT_VBATT_MIN_MV	2800u
+ #define SWEET_BATT_VBATT_MAX_MV	4600u
++/* A 30 s poll that moves the published percentage by more than this is held
++ * back until the next poll confirms it: one torn or stale gauge byte must not
++ * move what IOKit (and therefore the screen) already shows. */
++#define SWEET_BATT_SOC_JUMP	5u
+ 
+ class SweetBattery : public IOPMPowerSource {
+ 	OSDeclareDefaultStructors(SweetBattery);
+@@ -54,8 +61,8 @@
+ 	IOWorkLoop *fLoop;
+ 	IOTimerEventSource *fTimer;
+ 	bool fTimerAdded, fRunning, fReal;
+-	bool fSid2;
+-	unsigned fLastMv;
++	bool fSid2, fPercentValid;
++	unsigned fLastMv, fLastPercent, fPendingPercent;
+ 	int fLastMode;
+ 	void putNumber(const char *key, UInt32 value);
+ 	void putBool(const char *key, bool value);
+@@ -84,6 +91,10 @@
+ 	fTimerAdded = fRunning = fReal = false;
+ 	fSid2 = false;
+ 	fLastMv = 4200;	/* last real VBATT; static until a gauge word works */
++	/* Nothing has been published yet, so the first real sample is adopted as
++	 * is instead of being held back as an implausible jump. */
++	fPercentValid = false;
++	fLastPercent = fPendingPercent = 100;
+ 	if (dictionary) {
+ 		OSCollectionIterator *it = OSCollectionIterator::withCollection(dictionary);
+ 		if (!it) {
+@@ -186,7 +197,8 @@
+ 	int mode = measured ? 1 : 0;
+ 	if (mode != fLastMode) {
+ 		IOLog("SWEET BATTERY: %s, %u%% %umV external=%d charging=%d\n",
+-		    measured ? "PM6150 / estimated SOC" : "static fallback",
++		    !measured ? "static fallback" :
++		    (fSid2 ? "PM6150B / gauge SOC" : "PM6150 / estimated SOC"),
+ 		    percent, mv, external, charging);
+ 		fLastMode = mode;
+ 	}
+@@ -339,30 +351,61 @@
+ 	 * decodes these two bytes and nothing else. 0x110b (charge path) is
+ 	 * equally unproven, so "capable" follows VBUS presence instead. */
+ 	bool charging = external && state >= 1u && state <= 4u;
+-	bool full = external && state == 5u;
+-	unsigned percent = socOk ? (unsigned)soc :
++	/* The percentage that goes to IOKit: the gauge register whenever it is
++	 * ready and in range, the single-cell curve only when it is not. This is
++	 * the value the old code computed and then threw away. */
++	unsigned raw = socOk ? (unsigned)soc :
+ 	    (mvOk ? estimatePercent(mv) : 100u);
++	/* Which of the two said it, for the log line below. */
++	const char *src = socOk ? "gauge" : (mvOk ? "curve" : "none");
++	if (!measured) {
++		/* No usable SOC and no usable pack: keep the old static source
++		 * rather than publish a number derived from nothing. */
++		raw = 100u;
++		src = "none";
++	}
++	/* SMB5 state 5 is "charging inhibited", which is not a capacity claim.
++	 * Calling that full at the gauge's 59 % is exactly the inconsistency this
++	 * patch removes, so only the gauge itself may reach 100 %. */
++	bool full = external && state == 5u && raw >= 99u;
++	/* Flicker guard. A poll that moves more than SWEET_BATT_SOC_JUMP points
++	 * holds the previously published value, unless the poll before it already
++	 * reported that same value (two in a row agreeing means the pack really
++	 * moved). A photo of the log shows raw= vs the published number. */
++	unsigned published = raw;
++	if (!fPercentValid) {
++		/* First usable sample after boot: adopt it, nothing to hold. */
++		fPercentValid = true;
++	} else {
++		unsigned gap = raw > fLastPercent ? raw - fLastPercent :
++		    fLastPercent - raw;
++		if (gap > SWEET_BATT_SOC_JUMP && raw != fPendingPercent) {
++			published = fLastPercent;	/* keep what the UI shows */
++		}
++	}
++	fPendingPercent = raw;
++	fLastPercent = published;
+ 	if (mvOk) {
+ 		fLastMv = mv;	/* hold the last real voltage over a failed word */
+ 	}
+-	if (!measured || full) {
+-		percent = 100;
+-	}
+-	/* Exactly one line per poll: the raw bytes, so a photo of the log proves
+-	 * the PMIC answered, plus what was published. */
++	/* Exactly one line per poll: the raw bytes, the percentage the PMIC gave
++	 * (src=gauge is 0x4009, src=curve is the fallback table) and the one
++	 * actually published, so a photo of the log proves both what was read and
++	 * what iOS was told. held=1 means the guard kept the previous value. */
+ 	IOLog("SWEET BATTERY SID2: soc=%#x sts=%#x ready=%d vbatt=%#x mv=%u "
+-	    "uv=%u chgr=%#x usb=%#x sysbatt=%#x -> %u%% %umV "
+-	    "external=%d charging=%d full=%d\n",
++	    "uv=%u chgr=%#x usb=%#x sysbatt=%#x raw=%u%% src=%s held=%d "
++	    "-> %u%% %umV external=%d charging=%d full=%d\n",
+ 	    (unsigned)soc, (unsigned)socSts,
+ 	    (socSts & SWEET_BATT_SOC_READY) ? 1 : 0, (unsigned)rawVoltage, mv, uv,
+-	    (unsigned)chgr, (unsigned)usb, (unsigned)sysBatt, percent, fLastMv,
++	    (unsigned)chgr, (unsigned)usb, (unsigned)sysBatt, raw, src,
++	    published != raw ? 1 : 0, published, fLastMv,
+ 	    external ? 1 : 0, charging ? 1 : 0, full ? 1 : 0);
+ 	/* IBATT (0x41A2/0x41A3) is deliberately not read: the gen4 current LSB is
+ 	 * unproven, and a timed-out read poisons that APID lane for the whole boot,
+ 	 * which would take VBATT down with it. Amperage stays unpublished rather
+ 	 * than guessed; 0228-battery-diag prints the raw word when needed. */
+-	publish(percent, fLastMv, 0, external, external, charging, full, measured,
+-	    false);
++	publish(published, fLastMv, 0, external, external, charging, full,
++	    measured, false);
+ }
+ 
+ void
